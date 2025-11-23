@@ -24,6 +24,10 @@ class AppleAccount(ProviderAccount):
 
         return super().to_str()
 
+ALLOWED_BUNDLES = [
+    "com.fiteaseclient.app",
+    "com.fiteaseclient.coastalstrength",
+]
 
 class AppleProvider(OAuth2Provider):
     id = "apple"
@@ -84,7 +88,7 @@ class AppleProvider(OAuth2Provider):
         return login
 
     def get_auds(self):
-        return [aud.strip() for aud in self.app.client_id.split(",")]
+        return ALLOWED_BUNDLES
 
 
 provider_classes = [AppleProvider]
