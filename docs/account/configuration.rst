@@ -60,6 +60,9 @@ Overall
 Signup
 ******
 
+``ACCOUNT_SIGNUP_ENABLED`` (default: ``True``)
+  Controls whether users can sign up and create an account.
+
 ``ACCOUNT_SIGNUP_FIELDS`` (default: ``['username*', 'email', 'password1*', 'password2*']``)
   The list of fields to complete in the signup form: ``username``, ``email``,
   ``phone``, ``password1``, ``password2``.. Fields marked with an asterisk
@@ -115,9 +118,15 @@ Login
   of authentication methods (``"password"``, ``"mfa"``, or ``"socialaccount"``)
   for which login codes are required.
 
+``ACCOUNT_LOGIN_BY_CODE_SUPPORTS_RESEND`` (default: ``False``)
+  Whether or not the user can request a new login code.
+
 ``ACCOUNT_LOGIN_BY_CODE_TIMEOUT`` (default: ``180``)
   The code that is emailed has a limited life span. It expires this many seconds after
   which it was sent.
+
+``ACCOUNT_LOGIN_BY_CODE_FORMAT`` (default: ``settings.ALLAUTH_USER_CODE_FORMAT``)
+  Controls the format of the login code.
 
 ``ACCOUNT_LOGIN_METHODS`` (default: ``{"username"}``, options: ``"email"`` or ``"username"``)
   Specifies the login method to use -- whether the user logs in by entering
@@ -175,6 +184,9 @@ Password Reset
   Controls whether password reset is performed by means of following a link
   in the email (``False``), or by entering a code (``True``).
 
+``ACCOUNT_PASSWORD_RESET_BY_CODE_FORMAT`` (default: ``settings.ALLAUTH_USER_CODE_FORMAT``)
+  Controls the format of the password reset code.
+
 ``ACCOUNT_PASSWORD_RESET_BY_CODE_MAX_ATTEMPTS`` (default: ``3``)
   This setting controls the maximum number of attempts the user has at inputting
   a valid code.
@@ -228,6 +240,9 @@ Email Verification
   Controls whether email verification is performed by means of following a link
   in the email (``False``), or by entering a code (``True``).
 
+``ACCOUNT_EMAIL_VERIFICATION_BY_CODE_FORMAT`` (default: ``settings.ALLAUTH_USER_CODE_FORMAT``)
+  Controls the format of the email verification code.
+
 ``ACCOUNT_EMAIL_VERIFICATION_BY_CODE_MAX_ATTEMPTS`` (default: ``3``)
   This setting controls the maximum number of attempts the user has at inputting
   a valid code.
@@ -255,6 +270,12 @@ Email Verification
 Reauthentication
 ****************
 
+``ACCOUNT_REAUTHENTICATION_METHODS`` (default: ``{"password", "code", "mfa"}``)
+  Controls which methods can be used to reauthenticate. Supported values are
+  ``"password"`` for password reauthentication, ``"code"`` for a login code
+  sent to a verified email address or phone number, and ``"mfa"`` for TOTP,
+  recovery code, and WebAuthn reauthentication.
+
 ``ACCOUNT_REAUTHENTICATION_TIMEOUT`` (default: ``300``)
   Before asking the user to reauthenticate, we check if a successful
   (re)authentication happened within the amount of seconds specified here, and
@@ -262,7 +283,7 @@ Reauthentication
 
 ``ACCOUNT_REAUTHENTICATION_REQUIRED`` (default: ``False``)
   Specifies whether or not reauthentication is required before the user can
-  alter his account.
+  alter their account.
 
 
 Routing

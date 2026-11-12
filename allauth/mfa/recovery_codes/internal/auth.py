@@ -1,8 +1,14 @@
+from __future__ import annotations
+
 import hmac
 import secrets
+import time
 from hashlib import sha1
-from typing import List, Optional
 
+from django.contrib.auth.base_user import AbstractBaseUser
+from django.db import transaction
+
+from allauth.core.internal.cryptokit import compare_user_code
 from allauth.mfa import app_settings
 from allauth.mfa.models import Authenticator
 from allauth.mfa.utils import decrypt, encrypt
@@ -13,14 +19,14 @@ class RecoveryCodes:
         self.instance = instance
 
     @classmethod
-    def activate(cls, user) -> "RecoveryCodes":
+    def activate(cls, user: AbstractBaseUser) -> RecoveryCodes:
         instance = Authenticator.objects.filter(
-            user=user, type=Authenticator.Type.RECOVERY_CODES
+            user_id=user.pk, type=Authenticator.Type.RECOVERY_CODES
         ).first()
         if instance:
             return cls(instance)
         instance = Authenticator(
-            user=user,
+            user=user,  # type:ignore[misc]
             type=Authenticator.Type.RECOVERY_CODES,
             data={
                 "seed": encrypt(cls.generate_seed()),
@@ -35,13 +41,13 @@ class RecoveryCodes:
         key = secrets.token_hex(40)
         return key
 
-    def _get_migrated_codes(self) -> Optional[List[str]]:
+    def _get_migrated_codes(self) -> list[str] | None:
         codes = self.instance.data.get("migrated_codes")
         if codes is not None:
             return [decrypt(code) for code in codes]
         return None
 
-    def generate_codes(self) -> List[str]:
+    def generate_codes(self) -> list[str]:
         migrated_codes = self._get_migrated_codes()
         if migrated_codes is not None:
             return migrated_codes
@@ -51,7 +57,7 @@ class RecoveryCodes:
         h = hmac.new(key=seed.encode("ascii"), msg=None, digestmod=sha1)
         byte_count = min(app_settings.RECOVERY_CODE_DIGITS // 2, h.digest_size)
         for i in range(app_settings.RECOVERY_CODE_COUNT):
-            h.update((f"{i:3},").encode("utf-8"))
+            h.update((f"{i:3},").encode())
             value = int.from_bytes(
                 h.digest()[:byte_count], byteorder="big", signed=False
             )
@@ -70,7 +76,7 @@ class RecoveryCodes:
         self.instance.data["used_mask"] = used_mask
         self.instance.save()
 
-    def get_unused_codes(self) -> List[str]:
+    def get_unused_codes(self) -> list[str]:
         migrated_codes = self._get_migrated_codes()
         if migrated_codes is not None:
             return migrated_codes
@@ -82,7 +88,7 @@ class RecoveryCodes:
             ret.append(code)
         return ret
 
-    def _validate_migrated_code(self, code: str) -> Optional[bool]:
+    def _validate_migrated_code(self, code: str) -> bool | None:
         migrated_codes = self._get_migrated_codes()
         if migrated_codes is None:
             return None
@@ -98,7 +104,12 @@ class RecoveryCodes:
             self.instance.save()
             return True
 
+    @transaction.atomic
     def validate_code(self, code: str) -> bool:
+        if self.instance.pk is not None:
+            self.instance = Authenticator.objects.select_for_update().get(
+                pk=self.instance.pk
+            )
         ret = self._validate_migrated_code(code)
         if ret is not None:
             return ret
@@ -106,7 +117,17 @@ class RecoveryCodes:
         for i, c in enumerate(self.generate_codes()):
             if self._is_code_used(i):
                 continue
-            if code == c:
+            if compare_user_code(actual=code, expected=c):
                 self._mark_code_used(i)
                 return True
         return False
+
+    def mark_as_viewed(self) -> None:
+        if self.did_view:
+            return
+        self.instance.data["viewed_at"] = time.time()
+        self.instance.save(update_fields=["data"])
+
+    @property
+    def did_view(self) -> bool:
+        return bool(self.instance.data.get("viewed_at"))

@@ -38,7 +38,7 @@ def test_callback_get(client, db, telegram_app):
 
 
 def test_callback(client, db, telegram_app, sociallogin_setup_state):
-    state = sociallogin_setup_state(client)
+    state = sociallogin_setup_state("telegram", client)
     auth_result = (
         base64.b64encode(
             json.dumps(
@@ -55,6 +55,28 @@ def test_callback(client, db, telegram_app, sociallogin_setup_state):
     post_data = {
         "tgAuthResult": auth_result,
     }
-    resp = client.post(reverse("telegram_callback") + f"?state={state}", post_data)
+    resp = client.post(f"{reverse('telegram_callback')}?state={state}", post_data)
     assert resp.status_code == HTTPStatus.FOUND
     assert SocialAccount.objects.filter(uid="123").exists()
+
+
+def test_callback_non_ascii_hash(client, db, telegram_app, sociallogin_setup_state):
+    state = sociallogin_setup_state("telegram", client)
+    auth_result = (
+        base64.b64encode(
+            json.dumps(
+                {
+                    "id": "123",
+                    "hash": "é",
+                    "auth_date": 2342342342,
+                }
+            ).encode()
+        )
+        .decode("ascii")
+        .replace("=", "")
+    )
+    response = client.post(
+        f"{reverse('telegram_callback')}?state={state}",
+        {"tgAuthResult": auth_result},
+    )
+    assert response.status_code == HTTPStatus.UNAUTHORIZED

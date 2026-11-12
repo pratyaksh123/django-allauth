@@ -10,6 +10,10 @@ Otherwise, install using::
 
     pip install "django-allauth[socialaccount]"
 
+When configuring authentication backends, review the :doc:`Django admin
+guidance <../common/admin>` and :doc:`username collation requirements
+<../account/usernames>`.
+
 Then, assuming you have a Django project up and running, add the following to
 the ``settings.py`` of your project::
 
@@ -30,14 +34,10 @@ the ``settings.py`` of your project::
         },
     ]
 
+    # Do not add ModelBackend solely for username login in Django admin;
+    # its login view is not rate limited.
     AUTHENTICATION_BACKENDS = [
-        ...
-        # Needed to login by username in Django admin, regardless of `allauth`
-        'django.contrib.auth.backends.ModelBackend',
-
-        # `allauth` specific authentication methods, such as login by email
         'allauth.account.auth_backends.AuthenticationBackend',
-        ...
     ]
 
     INSTALLED_APPS = [
@@ -55,7 +55,6 @@ the ``settings.py`` of your project::
         'allauth.socialaccount.providers.agave',
         'allauth.socialaccount.providers.amazon',
         'allauth.socialaccount.providers.amazon_cognito',
-        'allauth.socialaccount.providers.angellist',
         'allauth.socialaccount.providers.apple',
         'allauth.socialaccount.providers.asana',
         'allauth.socialaccount.providers.auth0',
@@ -106,6 +105,7 @@ the ``settings.py`` of your project::
         'allauth.socialaccount.providers.instagram',
         'allauth.socialaccount.providers.jupyterhub',
         'allauth.socialaccount.providers.kakao',
+        'allauth.socialaccount.providers.klaviyo',
         'allauth.socialaccount.providers.lemonldap',
         "allauth.socialaccount.providers.lichess",
         'allauth.socialaccount.providers.line',
@@ -133,6 +133,7 @@ the ``settings.py`` of your project::
         'allauth.socialaccount.providers.pocket',
         "allauth.socialaccount.providers.questrade",
         'allauth.socialaccount.providers.quickbooks',
+        'allauth.socialaccount.providers.recharge',
         'allauth.socialaccount.providers.reddit',
         'allauth.socialaccount.providers.robinhood',
         'allauth.socialaccount.providers.salesforce',

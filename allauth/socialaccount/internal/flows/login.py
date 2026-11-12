@@ -1,4 +1,6 @@
-from django.http import HttpResponseRedirect
+from __future__ import annotations
+
+from django.http import HttpRequest, HttpResponseRedirect
 from django.shortcuts import render
 
 from allauth.account import app_settings as account_settings
@@ -7,6 +9,7 @@ from allauth.account.utils import perform_login
 from allauth.core.exceptions import ImmediateHttpResponse, SignupClosedException
 from allauth.socialaccount import app_settings, signals
 from allauth.socialaccount.adapter import get_adapter
+from allauth.socialaccount.internal import statekit
 from allauth.socialaccount.internal.flows.connect import connect, do_connect
 from allauth.socialaccount.internal.flows.signup import (
     clear_pending_signup,
@@ -16,9 +19,10 @@ from allauth.socialaccount.models import SocialLogin
 from allauth.socialaccount.providers.base import AuthProcess
 
 
-def _login(request, sociallogin):
+def _login(request: HttpRequest, sociallogin: SocialLogin):
     sociallogin._accept_login(request)
     record_authentication(request, sociallogin)
+    assert sociallogin.user  # nosec
     return perform_login(
         request,
         sociallogin.user,
@@ -28,7 +32,7 @@ def _login(request, sociallogin):
     )
 
 
-def pre_social_login(request, sociallogin):
+def pre_social_login(request: HttpRequest, sociallogin: SocialLogin) -> None:
     clear_pending_signup(request)
     assert not sociallogin.is_existing  # nosec
     sociallogin.lookup()
@@ -38,7 +42,7 @@ def pre_social_login(request, sociallogin):
     )
 
 
-def complete_login(request, sociallogin, raises=False):
+def complete_login(request: HttpRequest, sociallogin: SocialLogin, raises=False):
     try:
         pre_social_login(request, sociallogin)
         process = sociallogin.state.get("process")
@@ -56,7 +60,7 @@ def complete_login(request, sociallogin, raises=False):
             raise
         return render(
             request,
-            "account/signup_closed." + account_settings.TEMPLATE_EXTENSION,
+            f"account/signup_closed.{account_settings.TEMPLATE_EXTENSION}",
         )
     except ImmediateHttpResponse as e:
         if raises:
@@ -64,14 +68,19 @@ def complete_login(request, sociallogin, raises=False):
         return e.response
 
 
-def _redirect(request, sociallogin):
+def _redirect(request: HttpRequest, sociallogin: SocialLogin):
     next_url = sociallogin.get_redirect_url(request) or "/"
     return HttpResponseRedirect(next_url)
 
 
-def _authenticate(request, sociallogin):
+def _authenticate(request: HttpRequest, sociallogin: SocialLogin):
     if request.user.is_authenticated:
+        pending_states = None
+        if request.user == sociallogin.user:
+            pending_states = statekit.get_states(request).copy()
         get_account_adapter(request).logout(request)
+        if pending_states:
+            request.session[statekit.STATES_SESSION_KEY] = pending_states
     if sociallogin.is_existing:
         # Login existing user
         ret = _login(request, sociallogin)
@@ -81,7 +90,7 @@ def _authenticate(request, sociallogin):
     return ret
 
 
-def record_authentication(request, sociallogin):
+def record_authentication(request: HttpRequest, sociallogin: SocialLogin) -> None:
     from allauth.account.internal.flows.login import record_authentication
 
     record_authentication(

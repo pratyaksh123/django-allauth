@@ -47,7 +47,6 @@ Provider Specifics
    agave
    amazon_cognito
    amazon
-   angellist
    apple
    atlassian
    auth0
@@ -95,6 +94,7 @@ Provider Specifics
    jupyterhub
    kakao
    keycloak
+   klaviyo
    lemonldap
    lichess
    line
@@ -120,6 +120,7 @@ Provider Specifics
    pocket
    questrade
    quickbooks
+   recharge
    reddit
    saml
    salesforce

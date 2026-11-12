@@ -1,13 +1,14 @@
 from http import HTTPStatus
-from unittest.mock import ANY
+from unittest.mock import ANY, patch
 
 from django.contrib.auth import get_user_model
 
 import pytest
+from fido2.utils import websafe_encode
 
 from allauth.account import app_settings
-from allauth.account.authentication import AUTHENTICATION_METHODS_SESSION_KEY
 from allauth.headless.constants import Flow
+from allauth.mfa.adapter import get_adapter
 from allauth.mfa.models import Authenticator
 
 
@@ -26,9 +27,110 @@ def test_passkey_login(
     assert data["data"]["user"]["id"] == passkey.user_id
 
 
-def test_passkey_login_get_options(client, headless_client, headless_reverse, db):
+def test_passkey_login_requires_user_verification(
+    client, passkey, webauthn_authentication_bypass, headless_reverse
+):
+    with webauthn_authentication_bypass(passkey, user_verified=False) as credential:
+        resp = client.get(headless_reverse("headless:mfa:login_webauthn"))
+        assert resp.status_code == HTTPStatus.OK
+        resp = client.post(
+            headless_reverse("headless:mfa:login_webauthn"),
+            data={"credential": credential},
+            content_type="application/json",
+        )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert resp.json()["errors"][0]["code"] == "incorrect_code"
+
+
+def test_invalid_passkey_login_does_not_consume_user_rate_limit(
+    client,
+    user_with_totp,
+    user_password,
+    headless_reverse,
+    settings,
+    enable_cache,
+    totp_validation_bypass,
+):
+    settings.ACCOUNT_RATE_LIMITS = {
+        "login_failed": "10/m/ip,1/m/key",
+    }
+    settings.MFA_RATE_LIMITS = {
+        "webauthn_login": "10/m/ip",
+    }
+    user_handle = get_adapter().get_public_key_credential_user_entity(user_with_totp)[
+        "id"
+    ]
+    credential = {
+        "response": {"userHandle": websafe_encode(user_handle)},
+    }
+    with (
+        patch("allauth.mfa.webauthn.internal.auth.parse_authentication_response"),
+        patch(
+            "allauth.mfa.webauthn.internal.auth.complete_authentication",
+            side_effect=get_adapter().validation_error("incorrect_code"),
+        ),
+    ):
+        resp = client.post(
+            headless_reverse("headless:mfa:login_webauthn"),
+            data={"credential": credential},
+            content_type="application/json",
+        )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+    resp = client.post(
+        headless_reverse("headless:account:login"),
+        data={
+            "username": user_with_totp.username,
+            "password": user_password,
+        },
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.UNAUTHORIZED
+    with totp_validation_bypass():
+        resp = client.post(
+            headless_reverse("headless:mfa:authenticate"),
+            data={"code": "123456"},
+            content_type="application/json",
+        )
+    assert resp.status_code == HTTPStatus.OK
+
+
+def test_passkey_login_rate_limit_applies_before_parsing(
+    client,
+    headless_reverse,
+    settings,
+    enable_cache,
+):
+    settings.MFA_RATE_LIMITS = {"webauthn_login": "1/m/ip"}
+
+    url = headless_reverse("headless:mfa:login_webauthn")
+
+    resp = client.post(
+        url,
+        data={"credential": {}},
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert resp.json()["errors"][0]["code"] == "required"
+
+    resp = client.post(
+        url,
+        data={"credential": {}},
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.TOO_MANY_REQUESTS
+
+
+def test_passkey_login_get_options(
+    client, headless_client, headless_reverse, db, settings
+):
+    settings.MFA_WEBAUTHN_USER_VERIFICATION = "discouraged"
     resp = client.get(headless_reverse("headless:mfa:login_webauthn"))
     data = resp.json()
+    assert (
+        data["data"]["request_options"]["publicKey"]["userVerification"] == "required"
+    )
     meta = {}
     if headless_client == "app":
         meta = {
@@ -41,13 +143,17 @@ def test_passkey_login_get_options(client, headless_client, headless_reverse, db
     }
 
 
+@pytest.mark.parametrize("user_verification", ["preferred", "required"])
 def test_reauthenticate(
     auth_client,
     passkey,
     user_with_recovery_codes,
     webauthn_authentication_bypass,
     headless_reverse,
+    settings,
+    user_verification,
 ):
+    settings.MFA_WEBAUTHN_USER_VERIFICATION = user_verification
     # View recovery codes, confirm webauthn reauthentication is an option
     resp = auth_client.get(headless_reverse("headless:mfa:manage_recovery_codes"))
     assert resp.status_code == HTTPStatus.UNAUTHORIZED
@@ -60,7 +166,10 @@ def test_reauthenticate(
         resp = auth_client.get(headless_reverse("headless:mfa:reauthenticate_webauthn"))
         data = resp.json()
         assert data["status"] == HTTPStatus.OK
-        assert data["data"]["request_options"] == ANY
+        assert (
+            data["data"]["request_options"]["publicKey"]["userVerification"]
+            == user_verification
+        )
 
     # Reauthenticate
     with webauthn_authentication_bypass(passkey) as credential:
@@ -72,6 +181,23 @@ def test_reauthenticate(
         assert resp.status_code == HTTPStatus.OK
     resp = auth_client.get(headless_reverse("headless:mfa:manage_recovery_codes"))
     assert resp.status_code == HTTPStatus.OK
+
+
+@pytest.mark.parametrize("http_method", ["get", "post"])
+def test_reauthentication_method_disabled(
+    auth_client, headless_reverse, settings, http_method
+):
+    settings.ACCOUNT_REAUTHENTICATION_METHODS = {"password", "code"}
+    request = getattr(auth_client, http_method)
+    resp = request(
+        headless_reverse("headless:mfa:reauthenticate_webauthn"),
+        data={} if http_method == "post" else None,
+        content_type="application/json",
+    )
+
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+    assert resp["content-type"] == "application/json"
+    assert resp.json()["status"] == HTTPStatus.FORBIDDEN
 
 
 def test_update_authenticator(
@@ -197,9 +323,18 @@ def test_2fa_login(
     data = resp.json()
     assert resp.status_code == HTTPStatus.OK
     assert data["data"]["user"]["id"] == passkey.user_id
-    assert client.headless_session()[AUTHENTICATION_METHODS_SESSION_KEY] == [
-        {"method": "password", "at": ANY, "username": passkey.user.username},
-        {"method": "mfa", "at": ANY, "id": ANY, "type": Authenticator.Type.WEBAUTHN},
+    assert data["data"]["methods"] == [
+        {
+            "method": "password",
+            "at": ANY,
+            "username": passkey.user.username,
+        },
+        {
+            "method": "mfa",
+            "at": ANY,
+            "id": ANY,
+            "type": Authenticator.Type.WEBAUTHN,
+        },
     ]
 
 
@@ -272,3 +407,13 @@ def test_passkey_signup(
     assert data["meta"]["is_authenticated"]
     authenticator = Authenticator.objects.get(user=user)
     assert authenticator.wrap().name == "Some key"
+
+
+def test_get_login_webauthn_doesnt_crash_with_jwt(
+    db, client, headless_reverse, settings
+):
+    settings.HEADLESS_TOKEN_STRATEGY = (
+        "tests.apps.headless.tokens.test_jwttokenstrategy.CustomJWTTokenStrategy"
+    )
+    resp = client.get(headless_reverse("headless:mfa:login_webauthn"))
+    assert resp.status_code == HTTPStatus.OK

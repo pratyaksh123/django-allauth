@@ -1,17 +1,20 @@
-import requests
-from hashlib import md5
+from __future__ import annotations
 
-from django.http import HttpResponseRedirect
-from django.urls import reverse
-from django.utils.http import urlencode
+import requests
+
+from django.http import HttpRequest
+from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 
+from allauth.account.internal.decorators import login_not_required
 from allauth.socialaccount.adapter import get_adapter
 from allauth.socialaccount.helpers import (
     complete_social_login,
     render_authentication_error,
 )
-from allauth.socialaccount.models import SocialLogin, SocialToken
+from allauth.socialaccount.internal import statekit
+from allauth.socialaccount.models import SocialToken
+from allauth.socialaccount.providers.base.views import BaseLoginView
 from allauth.socialaccount.providers.draugiem.provider import DraugiemProvider
 
 from ..base import AuthError
@@ -22,27 +25,18 @@ class DraugiemApiError(Exception):
 
 
 ACCESS_TOKEN_URL = "https://api.draugiem.lv/json"  # nosec
-AUTHORIZE_URL = "https://api.draugiem.lv/authorize"
 
 
-def login(request):
-    app = get_adapter().get_app(request, DraugiemProvider.id)
-    redirect_url = request.build_absolute_uri(reverse(callback))
-    # Draugiem mandates a weak hashing algorithm.
-    redirect_url_hash = md5(
-        (app.secret + redirect_url).encode("utf-8")
-    ).hexdigest()  # nosec
-    params = {
-        "app": app.client_id,
-        "hash": redirect_url_hash,
-        "redirect": redirect_url,
-    }
-    SocialLogin.stash_state(request)
-    return HttpResponseRedirect("%s?%s" % (AUTHORIZE_URL, urlencode(params)))
+@method_decorator(login_not_required, name="dispatch")
+class LoginView(BaseLoginView):
+    provider_id = DraugiemProvider.id
+
+
+login = LoginView.as_view()
 
 
 @csrf_exempt
-def callback(request):
+def callback(request: HttpRequest):
     adapter = get_adapter()
     provider = adapter.get_provider(request, DraugiemProvider.id)
 
@@ -60,7 +54,9 @@ def callback(request):
     try:
         app = provider.app
         login = draugiem_complete_login(request, app, request.GET["dr_auth_code"])
-        login.state = SocialLogin.unstash_state(request)
+        login.state = statekit.unstash_last_state(
+            request, provider_id=provider.sub_id, raises=True
+        )
 
         ret = complete_social_login(request, login)
     except (requests.RequestException, DraugiemApiError) as e:
@@ -72,18 +68,13 @@ def callback(request):
     return ret
 
 
-def draugiem_complete_login(request, app, code):
+def draugiem_complete_login(request: HttpRequest, app, code):
     provider = get_adapter().get_provider(request, DraugiemProvider.id)
-    response = (
-        get_adapter()
-        .get_requests_session()
-        .get(
-            ACCESS_TOKEN_URL,
-            {"action": "authorize", "app": app.secret, "code": code},
-        )
-    )
-    response.raise_for_status()
-    response_json = response.json()
+    with get_adapter().get_requests_session() as sess:
+        params = {"action": "authorize", "app": app.secret, "code": code}
+        response = sess.get(ACCESS_TOKEN_URL, params=params)
+        response.raise_for_status()
+        response_json = response.json()
 
     if "error" in response_json:
         raise DraugiemApiError(response_json["error"])

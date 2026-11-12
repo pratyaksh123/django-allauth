@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 
+from django.http import HttpRequest
 from django.urls import reverse
 
 from allauth.account.internal.decorators import login_not_required
@@ -8,7 +11,8 @@ from allauth.socialaccount.helpers import (
     complete_social_login,
     render_authentication_error,
 )
-from allauth.socialaccount.models import SocialLogin, SocialToken
+from allauth.socialaccount.internal import statekit
+from allauth.socialaccount.models import SocialToken
 from allauth.socialaccount.providers.base.constants import AuthError
 from allauth.socialaccount.providers.base.views import BaseLoginView
 from allauth.socialaccount.providers.oauth.client import OAuthClient, OAuthError
@@ -19,11 +23,14 @@ logger = logging.getLogger(__name__)
 
 class OAuthAdapter:
     client_class = OAuthClient
+    request_token_url: str
+    access_token_url: str
+    provider_id: str
 
-    def __init__(self, request):
+    def __init__(self, request: HttpRequest) -> None:
         self.request = request
 
-    def complete_login(self, request, app):
+    def complete_login(self, request: HttpRequest, app, token, **kwargs):
         """
         Returns a SocialLogin instance
         """
@@ -34,7 +41,7 @@ class OAuthAdapter:
         app = adapter.get_app(self.request, provider=self.provider_id)
         return app.get_provider(self.request)
 
-    def _get_client(self, request, callback_url, scope=None):
+    def _get_client(self, request: HttpRequest, callback_url, scope=None):
         provider = self.get_provider()
         app = provider.app
         parameters = {}
@@ -54,14 +61,17 @@ class OAuthAdapter:
 
 
 class OAuthView:
+    request: HttpRequest
+    adapter: OAuthAdapter
+
     @classmethod
     def adapter_view(cls, adapter):
         @login_not_required
-        def view(request, *args, **kwargs):
+        def view(request: HttpRequest, *args, **kwargs):
             self = cls()
             self.request = request
             self.adapter = adapter(request)
-            return self.dispatch(request, *args, **kwargs)
+            return self.dispatch(request, *args, **kwargs)  # type:ignore[attr-defined]
 
         return view
 
@@ -73,13 +83,13 @@ class OAuthLoginView(OAuthView, BaseLoginView):
 
 
 class OAuthCallbackView(OAuthView):
-    def dispatch(self, request):
+    def dispatch(self, request: HttpRequest):
         """
         View to handle final steps of OAuth based authentication where the user
         gets redirected back to from the service provider
         """
         provider = self.adapter.get_provider()
-        login_done_url = reverse(self.adapter.provider_id + "_callback")
+        login_done_url = reverse(f"{self.adapter.provider_id}_callback")
         client = self.adapter._get_client(request, login_done_url)
         if not client.is_valid():
             if "denied" in request.GET:
@@ -109,7 +119,9 @@ class OAuthCallbackView(OAuthView):
                 request, app, token, response=access_token
             )
             login.token = token
-            login.state = SocialLogin.unstash_state(request)
+            login.state = statekit.unstash_last_state(
+                request, provider_id=provider.sub_id, raises=True
+            )
             return complete_social_login(request, login)
         except OAuthError as e:
             return render_authentication_error(request, provider, exception=e)

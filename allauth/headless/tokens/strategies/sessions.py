@@ -1,4 +1,6 @@
-import typing
+from __future__ import annotations
+
+from typing import Any
 
 from django.contrib.sessions.backends.base import SessionBase
 from django.http import HttpRequest
@@ -8,6 +10,10 @@ from allauth.headless.tokens.strategies.base import AbstractTokenStrategy
 
 
 class SessionTokenStrategy(AbstractTokenStrategy):
+    @classmethod
+    def openapi_spec(cls) -> dict[str, Any]:
+        return super().openapi_spec()
+
     def create_session_token(self, request: HttpRequest) -> str:
         if not request.session.session_key:
             request.session.save()
@@ -16,7 +22,7 @@ class SessionTokenStrategy(AbstractTokenStrategy):
         assert isinstance(key, str)  # nosec
         return key
 
-    def lookup_session(self, session_token: str) -> typing.Optional[SessionBase]:
+    def lookup_session(self, session_token: str) -> SessionBase | None:
         session_key = session_token
         if sessionkit.session_store().exists(session_key):
             return sessionkit.session_store(session_key)

@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from __future__ import annotations
 
 from django.contrib import messages
 from django.contrib.auth.base_user import AbstractBaseUser
@@ -11,6 +11,7 @@ from allauth.account.internal.flows.reauthentication import (
 )
 from allauth.account.internal.userkit import user_email
 from allauth.account.models import EmailAddress
+from allauth.core.internal.httpkit import authenticated_user
 
 
 def can_delete_email(email_address: EmailAddress) -> bool:
@@ -19,8 +20,7 @@ def can_delete_email(email_address: EmailAddress) -> bool:
 
 
 def delete_email(request: HttpRequest, email_address: EmailAddress) -> bool:
-    if app_settings.REAUTHENTICATION_REQUIRED:
-        raise_if_reauthentication_required(request)
+    raise_if_reauthentication_required(request, app="allauth.account")
 
     success = False
     adapter = get_adapter()
@@ -32,11 +32,12 @@ def delete_email(request: HttpRequest, email_address: EmailAddress) -> bool:
             {"email": email_address.email},
         )
     else:
+        user = authenticated_user(request)
         email_address.remove()
         signals.email_removed.send(
             sender=EmailAddress,
             request=request,
-            user=request.user,
+            user=user,
             email_address=email_address,
         )
         adapter.add_message(
@@ -47,16 +48,15 @@ def delete_email(request: HttpRequest, email_address: EmailAddress) -> bool:
         )
         adapter.send_notification_mail(
             "account/email/email_deleted",
-            request.user,
+            user,
             {"deleted_email": email_address.email},
         )
         success = True
     return success
 
 
-def add_email(request: HttpRequest, form):
-    if app_settings.REAUTHENTICATION_REQUIRED:
-        raise_if_reauthentication_required(request)
+def add_email(request: HttpRequest, form) -> None:
+    raise_if_reauthentication_required(request, app="allauth.account")
 
     email_address = form.save(request)
     if email_address.pk:
@@ -79,9 +79,8 @@ def can_mark_as_primary(email_address: EmailAddress) -> bool:
     )
 
 
-def mark_as_primary(request: HttpRequest, email_address: EmailAddress):
-    if app_settings.REAUTHENTICATION_REQUIRED:
-        raise_if_reauthentication_required(request)
+def mark_as_primary(request: HttpRequest, email_address: EmailAddress) -> bool:
+    raise_if_reauthentication_required(request, app="allauth.account")
 
     # Not primary=True -- Slightly different variation, don't
     # require verified unless moving from a verified
@@ -113,7 +112,7 @@ def mark_as_primary(request: HttpRequest, email_address: EmailAddress):
 
 def emit_email_changed(
     request: HttpRequest,
-    from_email_address: Optional[EmailAddress],
+    from_email_address: EmailAddress | None,
     to_email_address: EmailAddress,
 ) -> None:
     user = to_email_address.user
@@ -137,14 +136,14 @@ def emit_email_changed(
 
 
 def assess_unique_email(
-    email: str, user: Optional[AbstractBaseUser] = None
-) -> Optional[bool]:
+    email: str, user: AbstractBaseUser | None = None
+) -> bool | None:
     """
     True -- email is unique
     False -- email is already in use
     None -- email is in use, but we should hide that using email verification.
     """
-    from allauth.account.utils import filter_users_by_email
+    from allauth.account.internal.userkit import filter_users_by_email
 
     if not app_settings.UNIQUE_EMAIL:
         return True
@@ -185,7 +184,7 @@ def assess_unique_email(
 
 def list_email_addresses(
     request: HttpRequest, user: AbstractBaseUser
-) -> List[EmailAddress]:
+) -> list[EmailAddress]:
     addresses = list(EmailAddress.objects.filter(user_id=user.pk))
     if (
         app_settings.EMAIL_VERIFICATION_BY_CODE_ENABLED
@@ -205,8 +204,8 @@ def list_email_addresses(
 
 
 def email_already_exists(
-    email: str, user: Optional[AbstractBaseUser] = None, always_raise: bool = False
-) -> Tuple[str, bool]:
+    email: str, user: AbstractBaseUser | None = None, always_raise: bool = False
+) -> tuple[str, bool]:
     """
     Throws a validation error (if allowed by enumeration prevention rules).
     Returns a tuple of [email, already_exists].
@@ -228,7 +227,7 @@ def email_already_exists(
     return (email, already_exists)
 
 
-def sync_user_email_address(user: AbstractBaseUser) -> Optional[EmailAddress]:
+def sync_user_email_address(user: AbstractBaseUser) -> EmailAddress | None:
     """
     Keep user.email in sync with user.emailaddress_set.
 
@@ -242,7 +241,7 @@ def sync_user_email_address(user: AbstractBaseUser) -> Optional[EmailAddress]:
     return None
 
 
-def sync_email_address(user: AbstractBaseUser, email: str) -> Optional[EmailAddress]:
+def sync_email_address(user: AbstractBaseUser, email: str) -> EmailAddress | None:
     if not EmailAddress.objects.filter(user_id=user.pk, email=email).exists():
         # get_or_create() to gracefully handle races
         address, _ = EmailAddress.objects.get_or_create(

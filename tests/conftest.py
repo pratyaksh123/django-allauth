@@ -69,6 +69,7 @@ def user_factory(email_factory, db, user_password, email_verified):
         email=None,
         username=None,
         commit=True,
+        is_active=True,
         with_email=True,
         email_verified=email_verified,
         password=None,
@@ -87,6 +88,7 @@ def user_factory(email_factory, db, user_password, email_verified):
 
         User = get_user_model()
         user = User()
+        user.is_active = is_active
         if password == "!":  # nosec
             user.password = password
         else:
@@ -136,7 +138,7 @@ def reauthentication_bypass():
     @contextmanager
     def f():
         with patch(
-            "allauth.account.internal.flows.reauthentication.did_recently_authenticate"
+            "allauth.account.internal.flows.reauthentication.did_recently_reauthenticate"
         ) as m:
             m.return_value = True
             yield
@@ -147,7 +149,7 @@ def reauthentication_bypass():
 @pytest.fixture
 def webauthn_authentication_bypass():
     @contextmanager
-    def f(authenticator):
+    def f(authenticator, user_verified=True):
         from fido2.utils import websafe_encode
 
         from allauth.mfa.adapter import get_adapter
@@ -157,7 +159,18 @@ def webauthn_authentication_bypass():
             new_callable=PropertyMock,
         ) as ad_m:
             with patch("fido2.server.Fido2Server.authenticate_begin") as ab_m:
-                ab_m.return_value = ({}, {"state": "dummy"})
+
+                def authenticate_begin(*, user_verification, **kwargs):
+                    return (
+                        {
+                            "publicKey": {
+                                "userVerification": user_verification.value,
+                            }
+                        },
+                        {"state": "dummy"},
+                    )
+
+                ab_m.side_effect = authenticate_begin
                 with patch("fido2.server.Fido2Server.authenticate_complete") as ac_m:
                     with patch(
                         "allauth.mfa.webauthn.internal.auth.parse_authentication_response"
@@ -172,7 +185,11 @@ def webauthn_authentication_bypass():
                             "credential_id"
                         )
                         ad_m.return_value = authenticator_data
-                        m.return_value = Mock()
+                        response = Mock()
+                        response.response.authenticator_data.is_user_verified.return_value = (
+                            user_verified
+                        )
+                        m.return_value = response
                         binding = Mock()
                         binding.credential_id = "credential_id"
                         ac_m.return_value = binding
@@ -186,7 +203,9 @@ def webauthn_authentication_bypass():
 @pytest.fixture
 def webauthn_registration_bypass():
     @contextmanager
-    def f(user, passwordless):
+    def f(user, passwordless, user_verified=None):
+        if user_verified is None:
+            user_verified = passwordless
         with patch("fido2.server.Fido2Server.register_complete") as rc_m:
             with patch(
                 "allauth.mfa.webauthn.internal.auth.parse_registration_response"
@@ -195,7 +214,7 @@ def webauthn_registration_bypass():
 
                 class FakeAuthenticatorData(bytes):
                     def is_user_verified(self):
-                        return passwordless
+                        return user_verified
 
                 binding = FakeAuthenticatorData(b"binding")
                 rc_m.return_value = binding
@@ -323,14 +342,14 @@ def user_with_passkey(user, passkey):
 
 @pytest.fixture
 def sociallogin_setup_state():
-    def setup(client, process=None, next_url=None, **kwargs):
-        state_id = "123"
+    def setup(provider_id, client, process=None, next_url=None, **kwargs):
+        state_id = "id321"
         session = client.session
         state = {"process": process or AuthProcess.LOGIN, **kwargs}
         if next_url:
             state["next"] = next_url
         states = {}
-        states[state_id] = [state, time.time()]
+        states[state_id] = [state, time.time(), provider_id]
         session[statekit.STATES_SESSION_KEY] = states
         session.save()
         return state_id
@@ -356,7 +375,7 @@ def get_last_email_verification_code():
 
     def f(client, mailoutbox):
         code = re.search(
-            "\n[0-9a-z]{6}\n", mailoutbox[-1].body, re.I | re.DOTALL | re.MULTILINE
+            "\n[0-9a-z-]{6,12}\n", mailoutbox[-1].body, re.I | re.DOTALL | re.MULTILINE
         )[0].strip()
         if hasattr(client, "headless_session"):
             session = client.headless_session()
@@ -379,7 +398,7 @@ def get_last_password_reset_code():
 
     def f(client, mailoutbox):
         code = re.search(
-            "\n[0-9a-z]{8}\n", mailoutbox[-1].body, re.I | re.DOTALL | re.MULTILINE
+            "\n[0-9a-z-]{8,12}\n", mailoutbox[-1].body, re.I | re.DOTALL | re.MULTILINE
         )[0].strip()
         if hasattr(client, "headless_session"):
             session = client.headless_session()
@@ -413,6 +432,8 @@ def settings_impacting_urls(settings):
                 "allauth.headless.socialaccount.urls",
                 "allauth.headless.usersessions.urls",
                 "allauth.headless.mfa.urls",
+                "allauth.idp.urls",
+                "allauth.idp.oidc.urls",
             ]:
                 if urlconf in sys.modules:
                     importlib.reload(sys.modules[urlconf])
@@ -511,3 +532,10 @@ def messagesoutbox():
 
     adapters.messagesoutbox = []
     yield adapters.messagesoutbox
+
+
+@pytest.fixture
+def request_context(rf):
+    request = rf.get("/")
+    with context.request_context(request):
+        yield request

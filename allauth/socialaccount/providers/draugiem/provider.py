@@ -1,7 +1,15 @@
+from __future__ import annotations
+
+from hashlib import md5
+
+from django.http import HttpRequest, HttpResponseRedirect
 from django.urls import reverse
 from django.utils.http import urlencode
 
 from allauth.socialaccount.providers.base import Provider, ProviderAccount
+
+
+AUTHORIZE_URL = "https://api.draugiem.lv/authorize"
 
 
 class DraugiemAccount(ProviderAccount):
@@ -28,10 +36,10 @@ class DraugiemProvider(Provider):
     name = "Draugiem"
     account_class = DraugiemAccount
 
-    def get_login_url(self, request, **kwargs):
-        url = reverse(self.id + "_login")
+    def get_login_url(self, request: HttpRequest, **kwargs):
+        url = reverse(f"{self.id}_login")
         if kwargs:
-            url = url + "?" + urlencode(kwargs)
+            url = f"{url}?{urlencode(kwargs)}"
         return url
 
     def extract_uid(self, data):
@@ -48,6 +56,25 @@ class DraugiemProvider(Provider):
     def extract_extra_data(self, data):
         uid = self.extract_uid(data)
         return data["users"][uid]
+
+    def redirect(
+        self, request: HttpRequest, process, next_url=None, data=None, **kwargs
+    ):
+        redirect_url = request.build_absolute_uri(reverse("draugiem_callback"))
+        app = self.app
+        # Draugiem mandates a weak hashing algorithm.
+        redirect_url_hash = md5(
+            f"{app.secret}{redirect_url}".encode()
+        ).hexdigest()  # nosec
+        params = {
+            "app": app.client_id,
+            "hash": redirect_url_hash,
+            "redirect": redirect_url,
+        }
+        self.stash_redirect_state(
+            request, process=process, next_url=next_url, data=data, **kwargs
+        )
+        return HttpResponseRedirect(f"{AUTHORIZE_URL}?{urlencode(params)}")
 
 
 provider_classes = [DraugiemProvider]

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from django import forms
 from django.utils.translation import gettext_lazy as _
 
@@ -13,7 +15,7 @@ class _BaseAddWebAuthnForm(forms.Form):
     name = forms.CharField(required=False)
     credential = forms.JSONField(required=True, widget=forms.HiddenInput)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         self.user = kwargs.pop("user")
         initial = kwargs.setdefault("initial", {})
         initial.setdefault(
@@ -24,7 +26,7 @@ class _BaseAddWebAuthnForm(forms.Form):
         )
         super().__init__(*args, **kwargs)
 
-    def clean_name(self):
+    def clean_name(self) -> str:
         """
         We don't want to make `name` a required field, as the WebAuthn
         ceremony happens before posting the resulting credential, and we don't
@@ -38,15 +40,19 @@ class _BaseAddWebAuthnForm(forms.Form):
             )
         return name
 
-    def clean(self):
-        cleaned_data = super().clean()
+    def clean(self) -> dict:
+        cleaned_data = super().clean() or {}
         credential = cleaned_data.get("credential")
         if credential:
             # Explicitly parse JSON payload -- otherwise, register_complete()
             # crashes with some random TypeError and we don't want to do
             # Pokemon-style exception handling.
             auth.parse_registration_response(credential)
-            auth.complete_registration(credential)
+            binding = auth.complete_registration(credential)
+            if cleaned_data.get("passwordless") and not binding.is_user_verified():
+                # Normally we should not end up here, so the fact that
+                # "incorrect_code" is not the best error message isn't too bad.
+                raise get_adapter().validation_error("incorrect_code")
         return cleaned_data
 
 
@@ -70,25 +76,36 @@ class AuthenticateWebAuthnForm(forms.Form):
     reauthenticated = False
     passwordless = False
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         self.user = kwargs.pop("user")
         super().__init__(*args, **kwargs)
 
-    def clean_credential(self):
+    def clean_credential(self) -> Authenticator:
         credential = self.cleaned_data["credential"]
         # Explicitly parse JSON payload -- otherwise, authenticate_complete()
         # crashes with some random TypeError and we don't want to do
         # Pokemon-style exception handling.
-        auth.parse_authentication_response(credential)
+        response = auth.parse_authentication_response(credential)
         user = self.user
         if user is None:
             user = auth.extract_user_from_response(credential)
-        clear_rl = check_rate_limit(user)
+            # Here, `user` is derived from an attacker controller payload.  If
+            # we were to use rate limits here, and attacker could lock out
+            # another user.
+            clear_rl = None
+        else:
+            clear_rl = check_rate_limit(user)
         authenticator = auth.complete_authentication(user, credential)
-        clear_rl()
+        if (
+            self.passwordless
+            and not response.response.authenticator_data.is_user_verified()
+        ):
+            raise get_adapter().validation_error("incorrect_code")
+        if clear_rl:
+            clear_rl()
         return authenticator
 
-    def save(self):
+    def save(self) -> None:
         authenticator = self.cleaned_data["credential"]
         post_authentication(
             context.request,
@@ -102,7 +119,7 @@ class LoginWebAuthnForm(AuthenticateWebAuthnForm):
     reauthenticated = False
     passwordless = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, user=None, **kwargs)
 
 
@@ -114,7 +131,7 @@ class ReauthenticateWebAuthnForm(AuthenticateWebAuthnForm):
 class EditWebAuthnForm(forms.Form):
     name = forms.CharField(required=True)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         self.instance = kwargs.pop("instance")
         initial = kwargs.setdefault("initial", {})
         initial.setdefault("name", self.instance.wrap().name)

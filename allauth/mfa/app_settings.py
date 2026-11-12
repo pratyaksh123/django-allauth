@@ -1,18 +1,23 @@
+from __future__ import annotations
+
 from datetime import timedelta
-from typing import Optional
+from typing import TypeVar
+
+
+_T = TypeVar("_T")
 
 
 class AppSettings:
-    def __init__(self, prefix):
+    def __init__(self, prefix: str) -> None:
         self.prefix = prefix
 
-    def _setting(self, name, dflt):
+    def _setting(self, name: str, dflt: _T) -> _T:
         from allauth.utils import get_setting
 
-        return get_setting(self.prefix + name, dflt)
+        return get_setting(f"{self.prefix}{name}", dflt)
 
     @property
-    def ADAPTER(self):
+    def ADAPTER(self) -> str:
         return self._setting("ADAPTER", "allauth.mfa.adapter.DefaultMFAAdapter")
 
     @property
@@ -20,39 +25,60 @@ class AppSettings:
         return self._setting("ALLOW_UNVERIFIED_EMAIL", False)
 
     @property
-    def FORMS(self):
+    def FORMS(self) -> dict:
         return self._setting("FORMS", {})
 
     @property
-    def RECOVERY_CODE_COUNT(self):
+    def RATE_LIMITS(self) -> dict:
+        rls: dict = self._setting("RATE_LIMITS", {})
+        if rls is False:
+            return {}
+        ret = {
+            # Passwordless WebAuthn logins. Unlike password-based logins, there
+            # is no secret that can be guessed on a per-account basis.
+            "webauthn_login": "10/m/ip",
+        }
+        ret.update(rls)
+        return ret
+
+    @property
+    def REAUTHENTICATION_REQUIRED(self) -> bool:
+        return self._setting("REAUTHENTICATION_REQUIRED", True)
+
+    @property
+    def RECOVERY_CODE_COUNT(self) -> int:
         """
         The number of recovery codes.
         """
         return self._setting("RECOVERY_CODE_COUNT", 10)
 
     @property
-    def RECOVERY_CODE_DIGITS(self):
+    def RECOVERY_CODE_DIGITS(self) -> int:
         """
         The number of digits of each recovery code.
         """
         return self._setting("RECOVERY_CODE_DIGITS", 8)
 
     @property
-    def TOTP_PERIOD(self):
+    def RECOVERY_CODES_SHOW_ONCE(self) -> bool:
+        return self._setting("RECOVERY_CODES_SHOW_ONCE", False)
+
+    @property
+    def TOTP_PERIOD(self) -> int:
         """
         The period that a TOTP code will be valid for, in seconds.
         """
         return self._setting("TOTP_PERIOD", 30)
 
     @property
-    def TOTP_DIGITS(self):
+    def TOTP_DIGITS(self) -> int:
         """
         The number of digits for TOTP codes
         """
         return self._setting("TOTP_DIGITS", 6)
 
     @property
-    def TOTP_ISSUER(self):
+    def TOTP_ISSUER(self) -> str:
         """
         The issuer.
         """
@@ -74,20 +100,32 @@ class AppSettings:
         return code
 
     @property
-    def TOTP_TOLERANCE(self):
+    def TOTP_TOLERANCE(self) -> int:
         """
         The number of time steps in the past or future to allow. Lower values are more secure, but more likely to fail due to clock drift.
         """
         return self._setting("TOTP_TOLERANCE", 0)
 
     @property
-    def SUPPORTED_TYPES(self):
+    def SUPPORTED_TYPES(self) -> list[str]:
         dflt = ["recovery_codes", "totp"]
         return self._setting("SUPPORTED_TYPES", dflt)
 
     @property
-    def WEBAUTHN_ALLOW_INSECURE_ORIGIN(self):
+    def WEBAUTHN_ALLOW_INSECURE_ORIGIN(self) -> bool:
         return self._setting("WEBAUTHN_ALLOW_INSECURE_ORIGIN", False)
+
+    @property
+    def WEBAUTHN_USER_VERIFICATION(self) -> str:
+        from django.core.exceptions import ImproperlyConfigured
+
+        value = self._setting("WEBAUTHN_USER_VERIFICATION", "preferred")
+        if value not in ("discouraged", "preferred", "required"):
+            raise ImproperlyConfigured(
+                "MFA_WEBAUTHN_USER_VERIFICATION must be one of: "
+                "'discouraged', 'preferred', 'required'"
+            )
+        return value
 
     @property
     def PASSKEY_LOGIN_ENABLED(self) -> bool:
@@ -123,7 +161,7 @@ class AppSettings:
         return self._setting("TRUST_COOKIE_NAME", "mfa_trusted")
 
     @property
-    def TRUST_COOKIE_DOMAIN(self) -> Optional[str]:
+    def TRUST_COOKIE_DOMAIN(self) -> str | None:
         from django.conf import settings
 
         return self._setting("TRUST_COOKIE_DOMAIN", settings.SESSION_COOKIE_DOMAIN)
@@ -141,13 +179,13 @@ class AppSettings:
         return self._setting("TRUST_COOKIE_PATH", settings.SESSION_COOKIE_PATH)
 
     @property
-    def TRUST_COOKIE_SAMESITE(self) -> str:
+    def TRUST_COOKIE_SAMESITE(self) -> str | bool:
         from django.conf import settings
 
         return self._setting("TRUST_COOKIE_SAMESITE", settings.SESSION_COOKIE_SAMESITE)
 
     @property
-    def TRUST_COOKIE_SECURE(self) -> Optional[str]:
+    def TRUST_COOKIE_SECURE(self) -> bool:
         from django.conf import settings
 
         return self._setting("TRUST_COOKIE_SECURE", settings.SESSION_COOKIE_SECURE)

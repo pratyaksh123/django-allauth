@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 import dataclasses
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.db import models
 from django.forms.fields import Field
+from django.http import HttpRequest
+from django.utils.module_loading import import_string
 
 from allauth.account import app_settings as account_settings
 from allauth.account.models import EmailAddress
@@ -12,7 +17,6 @@ from allauth.account.utils import user_display, user_username
 from allauth.core.internal.adapter import BaseAdapter
 from allauth.core.internal.httpkit import default_get_frontend_url
 from allauth.headless import app_settings
-from allauth.utils import import_attribute
 
 
 class DefaultHeadlessAdapter(BaseAdapter):
@@ -27,7 +31,7 @@ class DefaultHeadlessAdapter(BaseAdapter):
         # showing up in a UI.
         "account_not_found": "Unknown account.",
         "client_id_required": "`client_id` required.",
-        "invalid_token": "Invalid token.",
+        "invalid_token": "Invalid token.",  # nosec
         "token_authentication_not_supported": "Provider does not support token authentication.",
         "token_required": "`id_token` and/or `access_token` required.",
         "required": Field.default_error_messages["required"],
@@ -36,7 +40,7 @@ class DefaultHeadlessAdapter(BaseAdapter):
         "invalid_url": "Invalid URL.",
     }
 
-    def serialize_user(self, user) -> Dict[str, Any]:
+    def serialize_user(self, user: AbstractBaseUser) -> dict[str, Any]:
         """
         Returns the basic user data. Note that this data is also exposed in
         partly authenticated scenario's (e.g. password reset, email
@@ -52,11 +56,11 @@ class DefaultHeadlessAdapter(BaseAdapter):
             if v not in ("", None)
         }
 
-    def get_frontend_url(self, urlname, **kwargs):
+    def get_frontend_url(self, urlname: str, **kwargs) -> str | None:
         """Return the frontend URL for the given URL name."""
         return default_get_frontend_url(self.request, urlname, **kwargs)
 
-    def user_as_dataclass(self, user):
+    def user_as_dataclass(self, user: AbstractBaseUser):
         """
         See ``get_user_dataclass()``. This method returns an instance of
         that ``dataclass``, populated with the given ``user`` fields.
@@ -142,6 +146,15 @@ class DefaultHeadlessAdapter(BaseAdapter):
             fields.append(dc_field("username", str, "The username.", "wizard"))
         return dataclasses.make_dataclass("User", fields)
 
+    def populate_response_meta(
+        self, request: HttpRequest, meta: dict[str, Any]
+    ) -> None:
+        """
+        Populates the response metadata. Override this method to add custom
+        metadata.
+        """
+        pass
 
-def get_adapter():
-    return import_attribute(app_settings.ADAPTER)()
+
+def get_adapter() -> DefaultHeadlessAdapter:
+    return import_string(app_settings.ADAPTER)()

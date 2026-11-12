@@ -1,394 +1,600 @@
-65.13.1 (2025-11-20)
+65.22.0 (2026-11-11)
 ********************
+
+.. note::
+
+    💙 **Is django-allauth's authentication the entrance to your business?**
+    Please consider supporting its continued development by becoming a sponsor at
+    https://allauth.org/sponsors/. Your support helps keep this project thriving!
+
 
 Note worthy changes
 -------------------
 
-- Django 6.0 is now officially supported.
+- Reauthentication is now possible using a login code sent to a verified
+  email address or phone number.
 
+- The available reauthentication methods can now be configured using
+  ``ACCOUNT_REAUTHENTICATION_METHODS``.
 
-Fixes
------
+- There is a new setting ``ACCOUNT_SIGNUP_ENABLED`` (default: ``True``) to
+  enable or disable signup.
 
-- Internal imports related to headless token strategies were causing (harmless)
-  deprecation warnings, fixed.
+- New provider: Recharge.
 
-- Pending social signups stored in the session by allauth versions prior to
-  65.5.0 are not resumable by newer versions. This could cause 500s while
-  upgrading, fixed.
+- IdP: Authorization codes are now stored in the database instead of the cache.
 
-- Headless: the reauthentication-required response in the OpenAPI specification
-  was wrongly nested and did not match the actual implementation, fixed.
+- Headless: Honor ``USERSESSIONS_TRACK_ACTIVITY`` for authenticated app requests,
+  the Django REST framework and Django Ninja integrations, and JWT refreshes.
+  Stateless JWT access token validation continues to skip activity tracking.
 
+- Headless: The Django REST framework and Django Ninja authentication classes
+  can now be configured to allow or reject anonymous users and invalid session
+  tokens.
 
-65.13.0 (2025-10-31)
-********************
+- Headless: Custom response metadata can now be added using the new
+  ``populate_response_meta()`` adapter method.
 
-Note worthy changes
--------------------
+- Headless: The OpenAPI specification now reflects the authentication schemes
+  of the configured token strategy.
 
-- IdP: Added support for RP-Initiated Logout.
-
-- Headless: added JWT token strategy.
-
-- Added support for "Trust this browser?" functionality for logging in by code.
-  See ``ACCOUNT_LOGIN_BY_CODE_TRUST_ENABLED``.
-
-- OpenID Connect: to avoid issues with client IDs containing colons,
-  ``client_secret_post`` is now preferred above ``client_secret_basic``.
 
 
 Security notice
 ---------------
 
-- Both Okta and NetIQ were using ``preferred_username`` as the identifier for
-  third-party provider accounts.  That value may be mutable and should therefore
-  be avoided for authorization decisions.  The providers are now using ``sub``
-  instead.
+- Apple: Identity data from the unsigned callback payload is no longer trusted,
+  preventing forged verified email addresses and account takeover. Thanks to
+  Irregular (@Tomer-PL) for reporting.
 
-- IdP: marking a user as ``is_active=False`` after having handed tokens for that
-  user while the account was still active had no effect. Fixed -- the
-  access/refresh tokens are now rejected. Thanks to Joshua Rogers for reporting
-  this and the previous issue.
+- MFA: The recovery code view now prevents HTTP caching of recovery codes.
+
+- IdP: Authorization codes are now redeemed atomically. As per `RFC 6749,
+  Section 10.5 <https://datatracker.ietf.org/doc/html/rfc6749#section-10.5>`_,
+  reusing a code also revokes access and refresh tokens issued from the same
+  authorization grant.
+
+- IdP: Silent authorization now only considers consent granted to the
+  requesting client.
+
+- IdP: Token revocation is now restricted to tokens issued to the authenticated
+  client. Revoking a refresh token also revokes access tokens issued from the
+  same authorization grant.
+
+- IdP: PKCE now only accepts the advertised ``S256`` challenge method.
+
+- Previously, reauthentication checks were skipped when no reauthentication
+  method was available, for example for social-only accounts without a
+  password. Access is now denied instead.
+
+- Setting a password (e.g. using a social-only account that has no usable
+  password) now requires reauthentication when
+  ``ACCOUNT_REAUTHENTICATION_REQUIRED`` is enabled.
+
+- MFA: Fixed a remaining passwordless WebAuthn login path that did not enforce
+  user verification.
+
+- MFA: With a nonzero ``MFA_TOTP_TOLERANCE``, a used TOTP code could briefly be
+  reused within its tolerance window. Thanks to Zachary Satterly for reporting.
+
+
+65.21.1 (2026-10-30)
+********************
+
+Fixes
+-----
+
+- IdP: Allow resource indicators passed in an authorization request's
+  ``resource`` parameter to use URIs with a trailing slash.
+
+- socialaccount: Reduced login failures when multiple authentication flows are
+  running in parallel browser tabs. Pending provider states are now persisted
+  eagerly and preserved when the same user logs in again.
+
+
+Security notice
+---------------
+
+- Fixed rate limits with multiple windows for the same scope sharing a cache
+  entry, which could bypass longer windows and overcount requests in shorter
+  windows. Thanks to Daniel Denson for reporting.
+
+- MFA: Passwordless WebAuthn registration and login did not consistently enforce
+  user verification. Passkey flows now always require a PIN, biometric, or
+  equivalent user verification. User verification for WebAuthn MFA and
+  reauthentication can now be controlled using
+  ``MFA_WEBAUTHN_USER_VERIFICATION``.
+
+
+65.21.0 (2026-10-26)
+********************
+
+Note worthy changes
+-------------------
+
+- To give more granular control over when reauthentication is required, two new
+  settings are introduced: ``MFA_REAUTHENTICATION_REQUIRED`` and
+  ``SOCIALACCOUNT_REAUTHENTICATION_REQUIRED``. Additionally, you can provide
+  custom logic via the new adapter method ``is_reauthentication_required()``.
+
+
+Security notice
+---------------
+
+- Headless: Reaching the phone verification attempt limit did not abort pending
+  login/signup flows. Note that code expiry and SMS sending rate limits remained
+  in effect. Thanks to Wenhao Wu (@d3do-23) for reporting.
+
+- MFA: Fixed an issue where authentication records from an *inactive* user's
+  passwordless WebAuthn login could carry over to a subsequent login in the same
+  browser session, causing MFA to be skipped for the subsequent user. Thanks to
+  Wenhao Wu (@d3do-23) for reporting.
+
+
+65.20.1 (2026-10-20)
+********************
+
+Security notice
+---------------
+
+- MFA: Fixed a denial-of-service vulnerability where unauthenticated passwordless
+  WebAuthn login attempts could consume the per-user rate limit and lock a
+  targeted account out of TOTP authentication.
+
+- MFA: Fixed a vulnerability (introduced in 65.20.0) that allowed a TOTP code to
+  be reused within its validity window by submitting it in an alternative
+  representation.
+
+
+65.20.0 (2026-10-16)
+********************
+
+Note worthy changes
+-------------------
+
+- A recent login no longer counts for views that require reauthentication. Users
+  must now explicitly reauthenticate.
+
+- OpenID Connect providers can now override values from the server's discovery
+  document using ``openid_configuration_overrides``.
+
+- Account: Visiting signup now cancels pending login flows.
+
+
+Fixes
+-----
+
+- Headless: Cached JWT signing configuration to avoid repeatedly parsing RSA keys.
+
+- MFA: Non-ASCII authentication codes no longer cause a server error.
+
+- IdP: Fixed authorization code exchanges using ``client_secret_basic`` not
+  returning an ID token.
+
+- Account: The password reset-by-code timeout now restarts after the code is
+  confirmed, allowing time to choose a new password.
+
+- Account: On Python 3.15, every 404 response no longer emits a deprecation
+  warning for ``os.path.commonprefix()``.
+
+
+Security notice
+---------------
+
+- Account: Cancelling a multi-stage login did not discard authentication records
+  already collected. When another account was subsequently logged in using the
+  same session, records from both accounts were mingled. Aborted login flows now
+  discard their authentication records.
+
+- Authorization state is now bound to the provider that initiated the flow,
+  preventing it from being used at another provider's callback.
 
 
 Backwards incompatible changes
 ------------------------------
 
-- Headless now requires the ``headless`` extra to be installed. For example:
-  ``pip install django-allauth[headless]``.
+- Dropped support for Python 3.10.
 
-- Okta and NetIQ: see the security notice on Okta and NetIQ. Already existing
-  ``SocialAccount`` records will no longer be linked due to the switch to
-  ``sub``.  You will need to manually handle this situation either, by
-  populating ``SocialAccount.uid`` based on ``sub`` located in
-  ``SocialAccount.extra_data``,or, if you are absolutely certain the security
-  notice is of no concern for your use case, by setting ``"uid_field":
-  "preferred_username"`` in the relevant ``SocialApp.settings``.
+- Custom provider implementations using the ``SocialLogin.stash_state()`` or
+  ``SocialLogin.unstash_state()`` methods must switch to
+  ``Provider.stash_redirect_state()`` and ``Provider.unstash_redirect_state()``,
+  respectively. The ``SocialLogin`` methods have been removed.
 
 
-65.12.1 (2025-10-16)
+65.19.7 (2026-10-01)
 ********************
 
 Security notice
 ---------------
 
-- There was a flaw in the email verification process when using
-  ``ACCOUNT_CHANGE_EMAIL = True``.  If you are using this configuration, you are
-  advised to upgrade as soon as possible.  Note that the default value is
-  ``False``.
-
-
-65.12.0 (2025-10-05)
-********************
-
-Note worthy changes
--------------------
-
-- Updated VK urls from "vk.com" to "vk.ru".
-
-- Added new socialaccount provider: Discogs.
-
-- MediaWiki: you can now setup a custom user agent to avoid getting blocked,
-  see: https://phabricator.wikimedia.org/T400119
-
-- IdP: Added optional support for wildcards in redirect URIs and CORS origins.
-  To support this, a new field was added to the ``Client`` model. Therefore, you
-  need to run migrations for the ``allauth.idp.oidc`` app.
-
-- Headless: an email address that was in the process of being verified by code
-  was presented in the list of email address, but could not be deleted. Now, a
-  ``DELETE`` will actually abort the process, effectively removing the pending
-  email address from the list.
-
-
-65.11.2 (2025-09-09)
-********************
-
-Fixes
------
-
-- OpenID Connect: the OpenID Connect provider was using the wrong key lookup
-  mechanism, resulting in login failures.
-
-
-65.11.1 (2025-08-27)
-********************
-
-Security notice
----------------
-
-- If you configured password to be optional (e.g. using ``ACCOUNT_SIGNUP_FIELDS
-  = ["email*", "password1"]``), then accounts would be created having a blank
-  password instead of an unusable password. If you were using this configuration
-  then you may need to manually set an unusable password for accounts created.
-
-
-65.11.0 (2025-08-15)
-********************
-
-Note worthy changes
--------------------
-
-- OpenID Connect: using ``fetch_userinfo=False`` you can now skip the additional
-  call to the userinfo endpoint. Instead, the ID token will be used.
-
-
-Fixes
------
-
-- Headless: passwordless signup was not supported, fixed.
-
-- Headless: when serializing the user nested dataclasses, as well as optional
-  types ended up as ``string`` type, fixed.
-
-- When signing up with a social account no authentication record was added to
-  the session, fixed.
+- The Tumblr providers (both ``tumblr`` and ``tumblr_oauth2``) used mutable blog
+  names as the identifier for third-party accounts. If a blog name changed and
+  was then claimed by another user, that user could log in to the original
+  owner's account. The providers now use the stable blog UUID instead. Thanks to
+  Sanjeev Kumar for reporting.
 
 
 Backwards incompatible changes
 ------------------------------
 
-- OpenID Connect: the ID token and userinfo (when present) are now stored in
-  ``SocialAccount.extra_data``, below the respective ``"id_token"`` and
-  ``"userinfo"`` keys. Compatibility with ``extra_data`` from existing accounts
-  that do not have this new structure is retained. However, if your own project
-  expects ``extra_data`` to be in a certain format this change may impact you.
+- Tumblr: Existing ``SocialAccount`` records will no longer be linked due to the
+  switch to stable identifiers. You will need to manually handle this situation,
+  see the "Account ID Change" section in the Tumblr provider docs.
 
 
-65.10.0 (2025-07-10)
+65.19.6 (2026-09-30)
 ********************
 
-Note worthy changes
--------------------
+Security notice
+---------------
 
-- IdP: Added support for the device authorization grant.
+- The minimum OAuthLib version for the ``socialaccount`` and ``idp-oidc`` extras
+  is now 4.0.0, incorporating upstream security fixes for GHSA-hj66-6f7g-4r5v
+  and GHSA-xpv3-w29h-x7cv.
 
-- Headless: custom user payloads can now be properly reflected in the OpenAPI
-  specification by provider a user ``dataclass``. See the newly introduced
-  ``get_user_dataclass()`` and ``user_as_dataclass()`` adapter methods.
-
-- Added a new signal (``authentication_step_completed``) that is emitted when an
-  individual authentication step is completed.
-
-- MFA: Added a setting (``MFA_ALLOW_UNVERIFIED_EMAIL``) to allow unverified
-  email addresses in combination with MFA.
+- The Bitbucket and Pinterest providers used mutable usernames as the identifier
+  for third-party accounts. If a username changed and was then claimed by
+  another user, that user could log in to the original owner's account. The
+  providers now use stable identifiers instead. Thanks to Sanjeev Kumar for
+  reporting.
 
 
 Backwards incompatible changes
 ------------------------------
 
-- Soundcloud: as per https://developers.soundcloud.com/blog/urn-num-to-string,
-  the provider now uses the user ``urn`` instead of the ``id`` as the ID for
-  social accounts. This change is backward incompatible. Instructions on
-  how to migrate existing social accounts can be found in the allauth provider
-  documentation for SoundCloud.
+- Bitbucket and Pinterest: Existing ``SocialAccount`` records will no longer be
+  linked due to the switch to stable identifiers.  You will need to manually
+  handle this situation by populating ``SocialAccount.uid`` based on
+  ``account_id`` (Bitbucket) or ``id`` (Pinterest) located in
+  ``SocialAccount.extra_data``.
 
+
+65.19.5 (2026-09-28)
+********************
+
+Security notice
+---------------
+
+- Account: When the potentially unsafe ``ALLOWED_HOSTS = ["*"]`` configuration
+  was used, arbitrary redirect URLs were considered safe, allowing open
+  redirects. The wildcard is now ignored when validating redirect
+  destinations. Thanks to John Tipton and Yuji Egami for reporting.
+
+- Headless: ``X-Session-Token`` authentication for your own APIs (DRF / Ninja)
+  now uses Django's standard session auth hash check. A token is rejected after
+  the password changes outside of the allauth password-change flow, instead of
+  still loading the user by primary key while the session row exists.
+
+
+65.19.4 (2026-09-17)
+********************
+
+Security notice
+---------------
+
+- Account: On databases with broad Unicode collations (e.g. common MySQL/MariaDB
+  configurations), usernames such as ``admin`` and ``ádmin``, or email addresses
+  containing compatibility characters, could authenticate the same account while
+  consuming different rate limit keys. This resulted in a larger than intended
+  per account rate limit. To mitigate, matching rows are now checked against the
+  submitted username or email address before the password is verified. On these
+  configurations, projects using username authentication must remove Django's
+  ``ModelBackend`` from ``AUTHENTICATION_BACKENDS``, as it does not perform this
+  additional check.  Thanks to Yuji Egami for reporting.
+
+
+65.19.3 (2026-09-11)
+********************
 
 Fixes
 -----
 
-- Phone: The recently added support for phone (SMS) authentication did fully integrate
-  with third-party provider signups. For example, whether or not the phone
-  number is required was not respected during signup. Fixed.
+- Account: The email address data migrations (``0006`` and ``0008``) did not
+  honor the database selected using ``migrate --database``, potentially querying
+  or updating the default database instead. Fixed.
 
-- IdP: Token revocation failed when a single ``token_type_hint`` was passed,
-  fixed.
-
-- The ``verified_email_required`` decorator did not support email verification
-  by code. Additionally, it did not rate limit verification emails
-  in case of GET requests. Both are fixed.
-
-- The account adapter ``clean_email()`` method was not called when a social account
-  auto signup took place, fixed.
-
-
-65.9.0 (2025-06-01)
-*******************
-
-Note worthy changes
--------------------
-
-- Added ``allauth.idp`` to the project, offering out of the box OpenID Connect
-  provider support, as well as integration with Django REST framework and Django
-  Ninja.
-
-- Headless: the OpenAPI specification now more accurately reflects single client
-  configurations set via ``HEADLESS_CLIENTS``. When a single client is active,
-  the redundant ``{client}`` path parameter and its global definition are
-  removed from the generated schema.
-
-
-65.8.1 (2025-05-21)
-*******************
-
-Fixes
------
-
-- Fixed a compatibility issue with the newly released fido2 2.0.0 package.
+- MFA: Fixed various race conditions involving TOTP and recovery codes.
 
 
 Security notice
 ---------------
 
-- After a successful login, the rate limits for that login were cleared,
-  allowing a succesful login on a specific IP address to be used as a means to
-  clear the login failed rate limit for that IP address. Fixed.
+- Headless: When ``HEADLESS_JWT_STATEFUL_VALIDATION_ENABLED`` is on, JWT
+  access tokens are now rejected after the password changes outside of the
+  allauth password-change flow (for example via ``set_password()`` in a
+  shell). Stateful validation now uses the same session auth hash check that
+  refresh tokens already used.
+
+- A known flaw in the built-in rate limiting was that the configured limits
+  could be exceeded under a high volume of concurrent requests. This was
+  documented as an acceptably small margin of error. However, as Kaya Emre Arikan
+  (kemrec) demonstrated, the limits could be substantially exceeded under a
+  sufficiently high volume of concurrent requests. This is now fixed by
+  serializing rate limit updates.
 
 
-65.8.0 (2025-05-08)
-*******************
+65.19.2 (2026-09-01)
+********************
 
-Note worthy changes
+Fixes
+-----
+
+- Headless: Posting a well-formed JSON payload that was not an object (e.g. a
+  list or a string) to the headless endpoints resulted in a server error.
+
+Security notice
+---------------
+
+- MFA: TOTP enrollment code verification was not rate limited. Impact is
+  limited, as to exploit this you would need to be already fully authenticated,
+  pass (rate-limited) reauthentication, and brute force within a 30s TOTP
+  window.
+
+
+65.19.1 (2026-08-13)
+********************
+
+Fixes
+-----
+
+- IdP: Fixed an incorrect URL reverse in the OpenID Connect authorization
+  template. It silently resolved to an empty form action (posting back to the
+  same URL), so the flow kept working regardless.
+
+- IdP: Redirectable errors from the authorization endpoint were not delivered to
+  clients registered with an app native (non-http(s)) ``redirect_uri``.
+
+
+Security notice
+---------------
+
+- IdP: The OpenID Connect RP-initiated logout endpoint honored any
+  ``post_logout_redirect_uri`` that could not be tied to a registered client,
+  making it an open redirector. It now only redirects to URIs that can be
+  verified as registered. The impact is low: no tokens or secrets are exposed,
+  it merely allowed redirecting the user agent to an arbitrary URL after logout.
+
+
+65.19.0 (2026-08-06)
+********************
+
+Noteworthy changes
 -------------------
 
-- Fixed VK (a.k.a VK ID) social account provider. Improved its documentation.
+- Officially support Django 6.1.
 
-- Added optional support for requesting new email/phone verification codes during
-  signup.  See ``ACCOUNT_EMAIL_VERIFICATION_SUPPORTS_RESEND`` and
-  ``ACCOUNT_PHONE_VERIFICATION_SUPPORTS_RESEND``.
+- IdP: Added support for Client ID Metadata Document (CIMD).
 
-- Added optional support for changing your email or phone at the verification stage while signing up.
-  See ``ACCOUNT_EMAIL_VERIFICATION_SUPPORTS_CHANGE`` and
-  ``ACCOUNT_PHONE_VERIFICATION_SUPPORTS_CHANGE``.
+- IdP: Added ``IDP_OIDC_REFRESH_TOKEN_EXPIRES_IN``, allowing refresh tokens to
+  expire. Combined with ``IDP_OIDC_ROTATE_REFRESH_TOKEN``, this results in a
+  sliding (inactivity) window. Defaults to ``None`` (no expiry), preserving the
+  previous behavior. Whenever a refresh token carries an expiry, its remaining
+  lifetime is returned to the client as ``refresh_expires_in`` in the token
+  response.
 
-- Added support for Mailcow OAuth2.
+- IdP: Added an ``oidc_cleartokens`` management command that deletes expired
+  OpenID Connect tokens.
 
+- IdP: Added key rotation support via ``IDP_OIDC_PRIVATE_KEYS``, as well as
+  cache control for the JWKS endpoint.
 
-65.7.0 (2025-04-03)
-*******************
+- IdP: Added RFC 7662 OAuth 2.0 Token Introspection support.
 
-Note worthy changes
--------------------
+- The ``jwt`` and ``cryptography`` dependencies are now imported lazily.
+  Deployments that register JWT-verifying providers (e.g. Google, or OpenID
+  Connect) - for example, no longer pay their memory cost (roughly 8-10 MiB
+  per process) unless a token is actually verified.
 
-- Officially support Django 5.2.
-
-- Headless: the URL to the OpenID configuration of the provider is now exposed
-  in the provider configuration.
+- On the "Change Password" form, the "Forgot password?" link has been moved into
+  the password field help text, and the "Reauthenticate" form now shows it too.
+  As on the login form, the link can be customized via the
+  ``account/password_reset_help_text.html`` template.
 
 
 Fixes
 -----
 
-- Headless: when multiple login methods were enabled (e.g. both username and
-  email), the login endpoint would incorrectly return a 400
-  ``invalid_login``. Fixed.
+- IdP: App native URLs wouldn't be accepted as ``post_logout_redirect_uri``.
+
+- IdP: Fix ``IDP_OIDC_ID_TOKEN_EXPIRES_IN`` always returning the default value, even if set in settings.
 
 
-65.6.0 (2025-03-27)
-*******************
+65.18.0 (2026-05-29)
+********************
 
-Note worthy changes
+Noteworthy changes
 -------------------
 
-- MFA: Added support for "Trust this browser?" functionality, which presents users with MFA
-  enabled the choice to trust their browser allowing them to skip authenticating
-  per MFA on each login.
+- The ``password2`` (password confirmation) field on the set/change/reset
+  password forms now carries ``autocomplete="new-password"``, matching
+  ``password1``. This allows browser and password manager "suggest strong
+  password" features to fill both fields as a pair.
+
+- IdP: Added support for Dynamic Client Registration.
+
+- IdP: Added support for ``client_secret_basic``.
+
+- IdP: Added support for Resource Indicators (RFC 8707).
+
+- IdP: The ``.well-known/openid-configuration`` endpoint previously derived
+  ``response_types_supported`` and ``grant_types_supported`` from configured
+  clients. Per RFC 8414, these fields should reflect server capabilities, not
+  the configuration of existing clients. They are now statically derived.
+  Additionally, ``scopes_supported`` is now included. Use the new
+  ``populate_server_metadata()`` adapter method to customize the metadata.
+
+
+65.17.0 (2026-05-20)
+********************
+
+Noteworthy changes
+-------------------
+
+- Added new socialaccount provider: Klaviyo.
+
+- Rate limiting now truncates IPv6 addresses to their network prefix (default
+  ``/64``) to prevent bypass via address rotation. Configurable via
+  ``ALLAUTH_RATE_LIMIT_IPV6_PREFIX``.
+
+- Added ``authenticate_by_email`` hook to ``DefaultSocialAccountAdapter``,
+  allowing customization of user lookup and email matching during social login.
 
 
 Fixes
 -----
 
-- A check is in place to verify that ``ACCOUNT_LOGIN_METHODS`` is aligned with
-  ``ACCOUNT_SIGNUP_FIELDS``.  The severity level of that check has now been
-  lowered from "critical" to "warning", as there may be valid use cases for
-  configuring a login method that you are not able to sign up with. This check
-  (``account.W001``) can be silenced using Django's ``SILENCED_SYSTEM_CHECKS``.
-
-- The setting ``ACCOUNT_LOGIN_ON_PASSWORD_RESET = True`` was not respected when using
-  password reset by code.
+- BitBucket: When using the BitBucket API, the token is passed in the headers
+  instead of the query parameters, which no longer works since May 4th, 2026
+  (`deprecation notice <https://developer.atlassian.com/cloud/bitbucket/changelog/#CHANGE-3052>`__).
 
 
-65.5.0 (2025-03-14)
-*******************
+65.16.1 (2026-04-17)
+********************
 
-Note worthy changes
+Security notice
+---------------
+
+- The ``state`` parameter is a critical part of the OAuth2 handshake, used to
+  prevent CSRF attacks. The Edx, AngelList and Questrade providers were
+  originally added without ``state`` support, as these providers did not support
+  it at the time. Edx and Questrade have since added support, so their
+  configuration has been updated accordingly. AngelList is no longer operational
+  and has been removed. Thanks to Adil Ahmadzada for reporting.
+
+
+65.16.0 (2026-04-13)
+********************
+
+Noteworthy changes
 -------------------
 
-- Added support for phone (SMS) authentication.
+- MFA: You can now configure recovery codes to be only shown once
+  (``MFA_RECOVERY_CODES_SHOW_ONCE = True``).
 
-- Added support for resetting passwords by code, instead of a link
-  (``ACCOUNT_PASSWORD_RESET_BY_CODE_ENABLED``).
+- New signals for audit trail purposes: ``login_code_rejected``,
+  ``password_reset_code_rejected``, ``email_verification_code_rejected`` (in
+  ``allauth.account.signals``) and ``authentication_failed`` (in
+  ``allauth.mfa.signals``).
 
-- Added support for Tumblr OAuth2.
 
-- Simplified signup form configuration. The following settings all controlled
-  signup form: ``ACCOUNT_EMAIL_REQUIRED``, ``ACCOUNT_USERNAME_REQUIRED``,
-  ``ACCOUNT_SIGNUP_EMAIL_ENTER_TWICE``, ``ACCOUNT_SIGNUP_PASSWORD_ENTER_TWICE``.
-  This setup had its issues. For example, when email was not required it was
-  still available as an optional field, whereas the username field disappeared
-  when not required. Also, for phone/SMS support, additional settings
-  would have been required.  The settings are now all deprecated, and replaced by one
-  new setting: ``ACCOUNT_SIGNUP_FIELDS``, which can be configured to
-  e.g. ``['username*', 'email', 'password1*', 'password2*']`` to indicate which
-  fields are present and required (``'*'``). This change is performed in a
-  backwards compatible manner.
+65.15.1 (2026-04-02)
+********************
 
-- Headless: if, while signing up using a third-party provider account, there is
-  insufficient information received from the provider to automatically complete
-  the signup process, an additional step is needed to complete the missing data
-  before the user is fully signed up and authenticated.  You can now perform a
-  ``GET`` request to ``/_allauth/{client}/v1/auth/provider/signup`` to obtain
-  information on the pending signup.
+Fixes
+-----
 
-- Headless: OpenID Connect providers now support token authentication.
+- The context data for the various entrance views was inconsistent, e.g. some
+  where missing ``site`` or ``login_url``. Ensured all entrance views are now
+  handed over the same base context.
 
-- The "Forgot your password?" help text can now be more easily customized by
-  providing your own ``"account/password_reset_help_text.html"`` template.
+- MFA: accessing the WebAuthn login view while already being authenticated resulted
+  in a 500, fixed.
 
-- Removed inline scripts, so that it becomes possible to use a strong Content
-  Security Policy.
+- OAuth 1.0: Fixed an argument call order issue when performing requests.
 
-- Headless: The OpenAPI specification now dynamically reflects the
-  ``ACCOUNT_SIGNUP_FIELDS`` configuration, as well as any custom fields you have
-  in ``ACCOUNT_SIGNUP_FORM_CLASS``.
 
-- Added official support for Python 3.13.
+65.15.0 (2026-03-09)
+********************
+
+Noteworthy changes
+-------------------
+
+- All user facing codes (e.g. those that the user needs to manually input over
+  at password reset, email/phone verification, login code, OIDC device codes)
+  now follow the recommendations over at `RFC 8628, Section 6.1
+  <https://datatracker.ietf.org/doc/html/rfc8628#section-6.1>`_.  It uses dashed
+  codes, such as "WDJB-MJHT", by default. You can control the format of all codes
+  via a new setting `ALLAUTH_USER_CODE_FORMAT``, or, adjust the format per use
+  case via one of ``ACCOUNT_LOGIN_BY_CODE_FORMAT``,
+  ``ACCOUNT_PHONE_VERIFICATION_CODE_FORMAT``,
+  ``ACCOUNT_PASSWORD_RESET_BY_CODE_FORMAT``,
+  ``ACCOUNT_EMAIL_VERIFICATION_BY_CODE_FORMAT``, ``IDP_OIDC_USER_CODE_FORMAT``.
+
+- Added optional support for requesting new login codes. See
+  ``ACCOUNT_LOGIN_BY_CODE_SUPPORTS_RESEND``.
+
+
+Backwards incompatible changes
+------------------------------
+
+- Dropped support for Python 3.8 and 3.9. Both these Python versions are
+  end-of-life.
+
+
+65.14.3 (2026-02-13)
+********************
+
+Fixes
+-----
+
+- Version 65.14.2 was not compatible with Python 3.8/3.9 due to use of an
+  unsupported typing construct, fixed.
+
+
+65.14.2 (2026-02-13)
+********************
+
+Security notice
+---------------
+
+- Rate limiting and IP address detection: as Django applications cannot reliably
+  determine client IP addresses out of the box, you must override
+  ``get_client_ip()`` to match your deployment architecture. If you omitted to
+  do so, the default implementation trusted ``X-Forwarded-For``, which can be
+  spoofed to bypass rate limits. Now, ``X-Forwarded-For`` is distrusted by
+  default. You must either configure ``ALLAUTH_TRUSTED_PROXY_COUNT``, rely on
+  ``ALLAUTH_TRUSTED_CLIENT_IP_HEADER``, or override ``get_client_ip()``. Thanks
+  to Ayato Shitomi for reporting.
+
+
+65.14.1 (2026-02-07)
+********************
+
+Fixes
+-----
+
+- When using ``ACCOUNT_CHANGE_EMAIL = True``, if the user initiating the change
+  email process had no verified email address, ``user.email`` would still
+  reflect the old email address while the verification process was pending.
+
+Security notice
+---------------
+
+- SAML: When IdP initiated SSO was enabled (it is by default disabled), any URL
+  found in the SAML ``RelayState`` parameter would be used to redirect to,
+  potentially redirecting the authenticated user to a wrong site. Thanks to
+  Ayato Shitomi and Funabiki Keisuke for reporting.
+
+
+65.14.0 (2026-01-17)
+********************
+
+Noteworthy changes
+-------------------
+
+- Steam: the provider now supports initiating headless logins per
+  redirect.
+
+- Shopify: if ``email_verified`` is present in the user payload, it will be used
+  to mark the email address retrieved as verified accordingly.
+
+- IdP: added support for JWT based access tokens (see
+  ``IDP_OIDC_ACCESS_TOKEN_FORMAT``).
+
+- IdP: added support for pointing to a custom userinfo endpoint (see
+  ``IDP_OIDC_USERINFO_ENDPOINT``)
+
+- For OpenID Connect providers, you can now configure the field to be used as
+  the account ID by setting ``"uid_field"`` in the relevant
+  ``SocialApp.settings``.
+
+- Headless: the JWT algorithm is now configurable, supporting HS256.
 
 
 Fixes
 -----
 
-- Headless: In case you had multiple apps of the same provider configured,
-  you could run into a ``MultipleObjectsReturned``. Fixed.
+- IdP: Access tokens without a user attached (client credentials) were no longer
+  recognized in DRF/Ninja endpoints.
 
-
-65.4.1 (2025-02-07)
-*******************
-
-Fixes
------
-
-- To make way for a future ``"phone"`` method, ``AUTHENTICATION_METHOD`` was
-  removed in favor of a new ``LOGIN_METHODS``. While this change was done in a
-  backwards compatible manner within allauth scope, other packages accessing
-  ``allauth.account.app_settings.AUTHENTICATION_METHOD`` would break. Fixed.
-
-
-65.4.0 (2025-02-06)
-*******************
-
-Note worthy changes
--------------------
-
-- The setting ``ACCOUNT_AUTHENTICATION_METHOD: str`` (with values
-  ``"username"``, ``"username_email"``, ``"email"``) has been replaced by
-  ``ACCOUNT_LOGIN_METHODS: set[str]``. which is a set of values including
-  ``"username"`` or ``"email"``. This change is performed in a backwards
-  compatible manner.
-
-- Headless: when ``HEADLESS_SERVE_SPECIFICATION`` is set to ``True``, the API
-  specification will be served dynamically, over at
-  ``/_allauth/openapi.(yaml|json|html)``.  The
-  ``HEADLESS_SPECIFICATION_TEMPLATE_NAME`` can be configured to choose between
-  Redoc (``"headless/spec/redoc_cdn.html"``) and Swagger (
-  (``"headless/spec/swagger_cdn.html"``).
-
-- Headless: added a new setting, ``HEADLESS_CLIENTS`` which you can use to limit
-  the types of API clients (app/browser).
-
-- Headless: expanded the React SPA example to showcase integration with
-  Django Ninja as well as Django REST framework.
-
-- Headless: added out of the box support for being able to use the headless
-  session tokens with Django Ninja and Django REST framework.
+- ``requests`` sessions are now disposed of after use to avoid resource leaks.

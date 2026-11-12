@@ -1,10 +1,12 @@
-import time
-from typing import Optional
+from __future__ import annotations
 
-from django.http import HttpResponseRedirect
+import time
+
+from django.http import HttpRequest, HttpResponseRedirect
 from django.urls import reverse
 
 from allauth.account import app_settings
+from allauth.account.internal.flows.login import clear_authentication_records
 from allauth.account.models import Login
 from allauth.account.stages import LoginStage, LoginStageController
 
@@ -12,7 +14,7 @@ from allauth.account.stages import LoginStage, LoginStageController
 LOGIN_SESSION_KEY = "account_login"
 
 
-def get_pending_stage(request) -> Optional[LoginStage]:
+def get_pending_stage(request: HttpRequest) -> LoginStage | None:
     stage = None
     if not request.user.is_authenticated:
         login = unstash_login(request, peek=True)
@@ -22,18 +24,25 @@ def get_pending_stage(request) -> Optional[LoginStage]:
     return stage
 
 
-def redirect_to_pending_stage(request, stage: LoginStage):
+def redirect_to_pending_stage(
+    request: HttpRequest, stage: LoginStage
+) -> HttpResponseRedirect:
     if stage.urlname:
         return HttpResponseRedirect(reverse(stage.urlname))
     clear_login(request)
     return HttpResponseRedirect(reverse("account_login"))
 
 
-def clear_login(request):
+def pop_login(request: HttpRequest) -> None:
     request.session.pop(LOGIN_SESSION_KEY, None)
 
 
-def unstash_login(request, peek=False):
+def clear_login(request: HttpRequest) -> None:
+    pop_login(request)
+    clear_authentication_records(request)
+
+
+def unstash_login(request: HttpRequest, peek: bool = False) -> Login | None:
     login = None
     if peek:
         data = request.session.get(LOGIN_SESSION_KEY)
@@ -49,10 +58,10 @@ def unstash_login(request, peek=False):
                 login = None
                 clear_login(request)
             else:
-                request._account_login_accessed = True
+                request._account_login_accessed = True  # type:ignore[attr-defined]
     return login
 
 
-def stash_login(request, login):
+def stash_login(request: HttpRequest, login) -> None:
     request.session[LOGIN_SESSION_KEY] = login.serialize()
-    request._account_login_accessed = True
+    request._account_login_accessed = True  # type:ignore[attr-defined]

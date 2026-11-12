@@ -17,6 +17,7 @@ from allauth.socialaccount.providers.apple.apple_session import (
 )
 from allauth.socialaccount.providers.apple.client import jwt_encode
 from allauth.socialaccount.providers.apple.provider import AppleProvider
+from allauth.socialaccount.providers.apple.views import AppleOAuth2Adapter
 from tests.apps.socialaccount.base import OAuth2TestsMixin
 from tests.mocking import MockedResponse, mocked_response
 
@@ -146,6 +147,27 @@ class AppleTests(OAuth2TestsMixin, TestCase):
             sociallogin = self.provider.verify_token(None, {"id_token": id_token})
             assert sociallogin.user.email == "test@privaterelay.appleid.com"
 
+    def test_user_scope_data_only_contains_name(self):
+        request = type(
+            "Request",
+            (),
+            {
+                "apple_login_session": {
+                    "user": json.dumps(
+                        {
+                            "email": "victim@example.com",
+                            "email_verified": True,
+                            "name": {"firstName": "A", "lastName": "B"},
+                        }
+                    )
+                }
+            },
+        )()
+
+        data = AppleOAuth2Adapter(request).get_user_scope_data(request)
+
+        assert data == {"name": {"firstName": "A", "lastName": "B"}}
+
     def get_login_response_json(self, with_refresh_token=True):
         """
         `with_refresh_token` is not optional for apple, so it's ignored.
@@ -202,13 +224,11 @@ class AppleTests(OAuth2TestsMixin, TestCase):
 
     def login(self, resp_mock, process="login", with_refresh_token=True):
         resp = self.client.post(
-            reverse(self.provider.id + "_login")
-            + "?"
-            + urlencode(dict(process=process))
+            f"{reverse(f'{self.provider.id}_login')}?{urlencode(dict(process=process))}"
         )
         p = urlparse(resp["location"])
         q = parse_qs(p.query)
-        complete_url = reverse(self.provider.id + "_callback")
+        complete_url = reverse(f"{self.provider.id}_callback")
         self.assertGreater(q["redirect_uri"][0].find(complete_url), 0)
         response_json = self.get_login_response_json(
             with_refresh_token=with_refresh_token
@@ -233,17 +253,16 @@ class AppleTests(OAuth2TestsMixin, TestCase):
     def test_authentication_error(self):
         """Override base test because apple posts errors"""
         resp = self.client.post(
-            reverse(self.provider.id + "_callback"),
+            reverse(f"{self.provider.id}_callback"),
             data={"error": "misc", "state": "testingstate123"},
         )
         assert reverse("apple_finish_callback") in resp.url
         # Follow the redirect
         resp = self.client.get(resp.url)
 
+        template_ext = getattr(settings, "ACCOUNT_TEMPLATE_EXTENSION", "html")
         self.assertTemplateUsed(
-            resp,
-            "socialaccount/authentication_error.%s"
-            % getattr(settings, "ACCOUNT_TEMPLATE_EXTENSION", "html"),
+            resp, f"socialaccount/authentication_error.{template_ext}"
         )
 
     def test_apple_finish(self):

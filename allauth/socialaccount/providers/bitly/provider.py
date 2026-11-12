@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.bitly.views import BitlyOAuth2Adapter
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
@@ -18,6 +20,11 @@ class BitlyProvider(OAuth2Provider):
     oauth2_adapter_class = BitlyOAuth2Adapter
 
     def extract_uid(self, data):
+        """
+        Bitly doesn't document `login` as a guaranteed immutable ID, but
+        there is no alternative. So we treat it as "stable by policy, not by
+        contract."
+        """
         return str(data["login"])
 
     def extract_common_fields(self, data):

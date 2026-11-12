@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 
@@ -10,6 +12,7 @@ from allauth.account.forms import (
     ChangeEmailForm,
     ChangePhoneForm,
     ConfirmLoginCodeForm,
+    ConfirmReauthenticationCodeForm,
     ReauthenticateForm,
     RequestLoginCodeForm,
     ResetPasswordForm,
@@ -18,7 +21,7 @@ from allauth.account.forms import (
 )
 from allauth.account.internal import flows
 from allauth.account.models import EmailAddress, Login, get_emailconfirmation_model
-from allauth.core import context
+from allauth.core import context, ratelimit
 from allauth.core.internal.cryptokit import compare_user_code
 from allauth.headless.adapter import get_adapter
 from allauth.headless.internal.restkit import inputs
@@ -27,7 +30,7 @@ from allauth.headless.internal.restkit import inputs
 class SignupInput(BaseSignupForm, inputs.Input):
     password = inputs.CharField()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         password = account_settings.SIGNUP_FIELDS.get("password1")
         if not password:
@@ -49,7 +52,7 @@ class LoginInput(inputs.Input):
     phone = PhoneField(required=False)
     password = inputs.CharField()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         for field in ["username", "email", "phone"]:
             if field not in account_settings.LOGIN_METHODS:
@@ -80,7 +83,7 @@ class LoginInput(inputs.Input):
                         "too_many_login_attempts"
                     )
             else:
-                error_code = "%s_password_mismatch" % auth_method.value
+                error_code = f"{auth_method.value}_password_mismatch"
                 self.add_error(
                     "password", get_account_adapter().validation_error(error_code)
                 )
@@ -90,7 +93,7 @@ class LoginInput(inputs.Input):
 class VerifyEmailInput(inputs.Input):
     key = inputs.CharField()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         self.process = kwargs.pop("process", None)
         super().__init__(*args, **kwargs)
 
@@ -125,7 +128,7 @@ class RequestPasswordResetInput(ResetPasswordForm, inputs.Input):
 class ResetPasswordKeyInput(inputs.Input):
     key = inputs.CharField()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         self.user = kwargs.pop("user", None)
         self.code = kwargs.pop("code", None)
         super().__init__(*args, **kwargs)
@@ -170,7 +173,7 @@ class ChangePasswordInput(inputs.Input):
     current_password = inputs.CharField(required=False)
     new_password = inputs.CharField()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         self.user = kwargs.pop("user")
         super().__init__(*args, **kwargs)
         self.fields["current_password"].required = self.user.has_usable_password()
@@ -195,7 +198,7 @@ class AddEmailInput(AddEmailForm, inputs.Input):
 class SelectEmailInput(inputs.Input):
     email = inputs.CharField()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         self.user = kwargs.pop("user")
         super().__init__(*args, **kwargs)
 
@@ -248,6 +251,67 @@ class ResendEmailVerificationInput(SelectEmailInput):
 
 
 class ReauthenticateInput(ReauthenticateForm, inputs.Input):
+    pass
+
+
+class RequestReauthenticationCodeInput(inputs.Input):
+    email = inputs.EmailField(required=False)
+    phone = PhoneField(required=False)
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.user = kwargs.pop("user")
+        super().__init__(*args, **kwargs)
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if self.errors:
+            return cleaned_data
+        email = cleaned_data.get("email")
+        phone = cleaned_data.get("phone")
+        if not email and not phone:
+            raise get_adapter().validation_error("required")
+        if email and phone:
+            raise get_account_adapter().validation_error("select_only_one")
+
+        recipients = flows.reauthentication.get_reauthentication_code_recipients(
+            self.user
+        )
+        if email:
+            verified_email = next(
+                (
+                    recipient["email"]
+                    for recipient in recipients
+                    if "email" in recipient
+                    and recipient["email"].lower() == email.lower()
+                ),
+                None,
+            )
+            if verified_email is None:
+                self.add_error(
+                    "email", get_account_adapter().validation_error("unknown_email")
+                )
+            else:
+                cleaned_data["email"] = verified_email
+        elif {"phone": phone} not in recipients:
+            self.add_error(
+                "phone", get_account_adapter().validation_error("unknown_phone")
+            )
+        if not self.errors:
+            param = "email" if email else "phone"
+            recipient = cleaned_data[param]
+            if not ratelimit.consume(
+                context.request,
+                action="request_login_code",
+                key=recipient.lower(),
+            ):
+                self.add_error(
+                    param,
+                    get_account_adapter().validation_error("too_many_login_attempts"),
+                )
+        return cleaned_data
+
+
+class ConfirmReauthenticationCodeInput(ConfirmReauthenticationCodeForm, inputs.Input):
     pass
 
 

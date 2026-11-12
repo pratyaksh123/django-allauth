@@ -1,4 +1,9 @@
+from __future__ import annotations
+
+from typing import Any
+
 from django.core.exceptions import PermissionDenied
+from django.http import HttpRequest, HttpResponse, HttpResponseBase
 from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.utils.http import urlencode
@@ -10,7 +15,6 @@ from allauth.socialaccount.helpers import (
     complete_social_login,
     render_authentication_error,
 )
-from allauth.socialaccount.models import SocialLogin
 from allauth.socialaccount.providers.base.constants import AuthError
 from allauth.socialaccount.providers.base.views import BaseLoginView
 from allauth.socialaccount.providers.dummy.forms import AuthenticateForm
@@ -30,10 +34,13 @@ class AuthenticateView(FormView):
     template_name = "dummy/authenticate_form.html"
 
     @method_decorator(login_not_required)
-    def dispatch(self, request, *args, **kwargs):
-        self.state_id = request.GET.get("state")
-        if not self.state_id:
+    def dispatch(
+        self, request: HttpRequest, *args: Any, **kwargs: Any
+    ) -> HttpResponseBase:
+        state_id = request.GET.get("state")
+        if not state_id:
             raise PermissionDenied()
+        self.state_id = state_id
         self.provider = get_adapter().get_provider(self.request, DummyProvider.id)
         if request.method == "POST" and request.POST.get("action") == "cancel":
             return render_authentication_error(
@@ -45,15 +52,15 @@ class AuthenticateView(FormView):
 
         return super().dispatch(request, *args, **kwargs)
 
-    def form_valid(self, form):
+    def form_valid(self, form) -> HttpResponse:
         login = self.provider.sociallogin_from_response(self.request, form.cleaned_data)
-        login.state = SocialLogin.unstash_state(self.request)
+        login.state = self.provider.unstash_redirect_state(self.request, self.state_id)
         return complete_social_login(self.request, login)
 
-    def get_context_data(self, **kwargs):
+    def get_context_data(self, **kwargs) -> dict:
         ret = super().get_context_data(**kwargs)
         ret["action_url"] = (
-            reverse("dummy_authenticate") + "?" + urlencode({"state": self.state_id})
+            f"{reverse('dummy_authenticate')}?{urlencode({'state': self.state_id})}"
         )
         return ret
 

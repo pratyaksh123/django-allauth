@@ -1,5 +1,7 @@
-from allauth.account.internal.flows.login import AUTHENTICATION_METHODS_SESSION_KEY
+from allauth.account.internal.flows.login import (
+    AUTHENTICATION_METHODS_SESSION_KEY,
+    get_authentication_records,
+)
 
 
-def get_authentication_records(request):
-    return request.session.get(AUTHENTICATION_METHODS_SESSION_KEY, [])
+__all__ = ["AUTHENTICATION_METHODS_SESSION_KEY", "get_authentication_records"]

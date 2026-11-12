@@ -1,16 +1,14 @@
-from typing import Optional
+from __future__ import annotations
 
-from django.contrib import messages
+from django.http import HttpRequest
 
-from allauth.account import app_settings
-from allauth.account.adapter import get_adapter
-from allauth.account.internal.flows.code_verification import (
-    AbstractCodeVerificationProcess,
+from allauth.account import app_settings, signals
+from allauth.account.internal.flows._authenticate_by_code import (
+    BaseConfirmAuthenticationCodeProcess,
 )
 from allauth.account.internal.flows.email_verification import verify_email_indirectly
 from allauth.account.internal.flows.login import perform_login, record_authentication
 from allauth.account.internal.flows.phone_verification import verify_phone_indirectly
-from allauth.account.internal.flows.signup import send_unknown_account_mail
 from allauth.account.internal.stagekit import clear_login, stash_login
 from allauth.account.models import Login
 from allauth.account.stages import LoginByCodeStage, LoginStageController
@@ -19,8 +17,8 @@ from allauth.account.stages import LoginByCodeStage, LoginStageController
 LOGIN_CODE_STATE_KEY = "login_code"
 
 
-class LoginCodeVerificationProcess(AbstractCodeVerificationProcess):
-    def __init__(self, stage):
+class LoginCodeVerificationProcess(BaseConfirmAuthenticationCodeProcess):
+    def __init__(self, stage) -> None:
         self.stage = stage
         self.request = stage.request
         super().__init__(
@@ -30,10 +28,11 @@ class LoginCodeVerificationProcess(AbstractCodeVerificationProcess):
             user=stage.login.user,
         )
 
-    def finish(self, redirect_url: Optional[str]):
+    def finish(self, redirect_url: str | None):
         email = self.state.get("email")
         phone = self.state.get("phone")
         user = self.user
+        assert user  # nosec
         record_authentication(
             self.request, user, method="code", email=email, phone=phone
         )
@@ -54,72 +53,33 @@ class LoginCodeVerificationProcess(AbstractCodeVerificationProcess):
         else:
             return self.stage.exit()
 
-    def abort(self):
+    def record_invalid_attempt(self) -> bool:
+        has_attempts_left = super().record_invalid_attempt()
+        if self.user:
+            signals.login_code_rejected.send(
+                sender=LoginCodeVerificationProcess,
+                request=self.request,
+                user=self.user,
+                last_attempt=not has_attempts_left,
+            )
+        return has_attempts_left
+
+    def abort(self) -> None:
         clear_login(self.request)
 
-    def persist(self):
+    def persist(self) -> None:
         stash_login(self.request, self.stage.login)
-
-    def send(self):
-        email = self.state.get("email")
-        phone = self.state.get("phone")
-        if email:
-            self.send_by_email(email)
-        elif phone:
-            self.send_by_phone(phone)
-        else:
-            raise ValueError()
-
-    def send_by_phone(self, phone):
-        adapter = get_adapter()
-        if self.user:
-            code = adapter._generate_phone_verification_code_compat(
-                user=self.user, phone=phone
-            )
-            adapter.send_verification_code_sms(user=self.user, phone=phone, code=code)
-            self.state["code"] = code
-        else:
-            if self.stage.login.signup:
-                adapter.send_account_already_exists_sms(phone)
-            else:
-                adapter.send_unknown_account_sms(phone)
-        self.add_sent_message({"recipient": phone, "phone": phone})
-
-    def send_by_email(self, email):
-        adapter = get_adapter()
-        if not self.user:
-            if self.stage.login.signup:
-                adapter.send_account_already_exists_mail(email)
-            else:
-                send_unknown_account_mail(self.request, email)
-        else:
-            code = adapter.generate_login_code()
-            context = {
-                "request": self.request,
-                "code": code,
-            }
-            adapter.send_mail("account/email/login_code", email, context)
-            self.state["code"] = code
-        self.add_sent_message({"email": email, "recipient": email})
-
-    def add_sent_message(self, context):
-        get_adapter().add_message(
-            self.request,
-            messages.SUCCESS,
-            "account/messages/login_code_sent.txt",
-            context,
-        )
 
     @classmethod
     def initiate(
         cls,
         *,
-        request,
+        request: HttpRequest,
         user,
-        email: Optional[str] = None,
-        phone: Optional[str] = None,
+        email: str | None = None,
+        phone: str | None = None,
         stage=None,
-    ):
+    ) -> LoginCodeVerificationProcess:
         initial_state = cls.initial_state(user=user, email=email, phone=phone)
         initial_state["initiated_by_user"] = stage is None
         if not stage:

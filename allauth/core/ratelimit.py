@@ -1,21 +1,20 @@
-from typing import Optional
+from __future__ import annotations
 
-from django.conf import settings
-from django.http import HttpResponse
+from django.http import HttpRequest, HttpResponse
 
-from allauth import app_settings
 from allauth.core.exceptions import RateLimited  # noqa
 from allauth.core.internal import ratelimit as _impl
 from allauth.core.internal.ratelimit import Rate  # noqa
-from allauth.utils import import_callable
+from allauth.core.internal.ratelimit import respond_429
 
 
-def clear(request, *, action, key=None, user=None):
-    from allauth.account import app_settings
+__all__ = ("clear", "consume", "respond_429", "consume_or_429")
 
+
+def clear(request: HttpRequest, *, action: str, key=None, user=None) -> None:
     _impl.clear(
         request=request,
-        config=app_settings.RATE_LIMITS,
+        app="allauth.account",
         action=action,
         key=key,
         user=user,
@@ -23,7 +22,7 @@ def clear(request, *, action, key=None, user=None):
 
 
 def consume(
-    request,
+    request: HttpRequest,
     *,
     action,
     key=None,
@@ -36,11 +35,9 @@ def consume(
     to allauth. This method is using `allauth.account.app_settings` as a
     hard-coded source of settings, which is bad for reusability elsewhere.
     """
-    from allauth.account import app_settings
-
     usage = _impl.consume(
         request=request,
-        config=app_settings.RATE_LIMITS,
+        app="allauth.account",
         action=action,
         key=key,
         user=user,
@@ -52,21 +49,5 @@ def consume(
     return True
 
 
-def respond_429(request) -> HttpResponse:
-    if app_settings.HEADLESS_ENABLED and hasattr(request.allauth, "headless"):
-        from allauth.headless.base.response import RateLimitResponse
-
-        return RateLimitResponse(request)
-
-    try:
-        handler429 = import_callable(settings.ROOT_URLCONF + ".handler429")
-        handler429 = import_callable(handler429)
-    except (ImportError, AttributeError):
-        handler429 = _impl.handler429
-    return handler429(request)
-
-
-def consume_or_429(request, *args, **kwargs) -> Optional[HttpResponse]:
-    if not consume(request, *args, **kwargs):
-        return respond_429(request)
-    return None
+def consume_or_429(request: HttpRequest, *args, **kwargs) -> HttpResponse | None:
+    return _impl.consume_or_429(request=request, app="allauth.account", **kwargs)

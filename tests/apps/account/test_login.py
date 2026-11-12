@@ -9,10 +9,10 @@ from django.test import TestCase
 from django.test.utils import override_settings
 from django.urls import NoReverseMatch, reverse
 
-from pytest_django.asserts import assertTemplateUsed
+from pytest_django.asserts import assertRedirects, assertTemplateUsed
 
 from allauth.account import app_settings
-from allauth.account.authentication import AUTHENTICATION_METHODS_SESSION_KEY
+from allauth.account.authentication import get_authentication_records
 from allauth.account.forms import LoginForm
 from allauth.account.models import EmailAddress
 
@@ -53,7 +53,7 @@ class LoginTests(TestCase):
             resp, settings.LOGIN_REDIRECT_URL, fetch_redirect_response=False
         )
         self.assertEqual(
-            self.client.session[AUTHENTICATION_METHODS_SESSION_KEY],
+            get_authentication_records(resp.wsgi_request, user),
             [
                 {
                     "at": ANY,
@@ -208,7 +208,7 @@ class LoginTests(TestCase):
         resp = self.client.get(url)
         self.assertTemplateUsed(
             resp,
-            "account/password_reset_from_key.%s" % app_settings.TEMPLATE_EXTENSION,
+            f"account/password_reset_from_key.{app_settings.TEMPLATE_EXTENSION}",
         )
         self.assertFalse("token_fail" in resp.context_data)
 
@@ -315,7 +315,7 @@ class LoginTests(TestCase):
 
 
 def test_login_password_forgotten_link_not_present(client, db):
-    with patch("allauth.account.forms.reverse") as reverse_mock:
+    with patch("allauth.account.fields.reverse") as reverse_mock:
         reverse_mock.side_effect = NoReverseMatch
         form = LoginForm()
         assert form.fields["password"].help_text == ""
@@ -347,3 +347,14 @@ def test_login_page(client, db):
     resp = client.get(reverse("account_login"))
     assert resp.status_code == HTTPStatus.OK
     assertTemplateUsed(resp, "account/login.html")
+
+
+def test_login_with_space_in_password(client, db, settings):
+    """Tests login behaviour when the password contains spaces at the beginning/end."""
+    settings.ACCOUNT_EMAIL_VERIFICATION = app_settings.EmailVerificationMethod.OPTIONAL
+    user = get_user_model().objects.create(username="john")
+    user.set_password(" doe ")
+    user.save()
+
+    resp = client.post(reverse("account_login"), {"login": "john", "password": " doe "})
+    assertRedirects(resp, settings.LOGIN_REDIRECT_URL, fetch_redirect_response=False)

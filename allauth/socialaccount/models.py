@@ -1,26 +1,24 @@
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
+
+from typing import Any
 
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.contrib.sites.shortcuts import get_current_site
-from django.core.exceptions import ImproperlyConfigured, PermissionDenied
+from django.core.exceptions import ImproperlyConfigured
 from django.db import models
+from django.http import HttpRequest
 from django.utils.translation import gettext_lazy as _
 
 import allauth.app_settings
 from allauth import app_settings as allauth_settings
 from allauth.account.adapter import get_adapter as get_account_adapter
 from allauth.account.models import EmailAddress
-from allauth.account.utils import (
-    filter_users_by_email,
-    get_next_redirect_url,
-    setup_user_email,
-)
+from allauth.account.utils import setup_user_email
 from allauth.core import context
 from allauth.socialaccount import app_settings, providers, signals
 from allauth.socialaccount.adapter import get_adapter
-from allauth.socialaccount.internal import statekit
-from allauth.utils import get_request_param
 
 
 if not allauth_settings.SOCIALACCOUNT_ENABLED:
@@ -30,10 +28,10 @@ if not allauth_settings.SOCIALACCOUNT_ENABLED:
 
 
 class SocialAppManager(models.Manager):
-    def on_site(self, request):
+    def on_site(self, request: HttpRequest):
         if allauth.app_settings.SITES_ENABLED:
             site = get_current_site(request)
-            return self.filter(sites__id=site.id)
+            return self.filter(sites__id=site.id)  # type:ignore[union-attr]
         return self.all()
 
 
@@ -82,10 +80,10 @@ class SocialApp(models.Model):
         verbose_name = _("social application")
         verbose_name_plural = _("social applications")
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
-    def get_provider(self, request):
+    def get_provider(self, request: HttpRequest):
         provider_class = providers.registry.get_class(self.provider)
         return provider_class(request=request, app=self)
 
@@ -129,7 +127,7 @@ class SocialAccount(models.Model):
     def authenticate(self):
         return authenticate(account=self)
 
-    def __str__(self):
+    def __str__(self) -> str:
         from .helpers import socialaccount_user_display
 
         return socialaccount_user_display(self)
@@ -140,7 +138,7 @@ class SocialAccount(models.Model):
     def get_avatar_url(self):
         return self.get_provider_account().get_avatar_url()
 
-    def get_provider(self, request=None):
+    def get_provider(self, request: HttpRequest | None = None):
         provider = getattr(self, "_provider", None)
         if provider:
             return provider
@@ -175,8 +173,8 @@ class SocialToken(models.Model):
         verbose_name = _("social application token")
         verbose_name_plural = _("social application tokens")
 
-    def __str__(self):
-        return "%s (%s)" % (self._meta.verbose_name, self.pk)
+    def __str__(self) -> str:
+        return f"{self._meta.verbose_name} ({self.pk})"
 
 
 class SocialLogin:
@@ -206,23 +204,23 @@ class SocialLogin:
     """
 
     account: SocialAccount
-    token: Optional[SocialToken]
-    email_addresses: List[EmailAddress]
-    state: Dict
-    _did_authenticate_by_email: Optional[str]
-    phone: Optional[str]
+    token: SocialToken | None
+    email_addresses: list[EmailAddress]
+    state: dict
+    _did_authenticate_by_email: str | None
+    phone: str | None
     phone_verified: bool
 
     def __init__(
         self,
-        user=None,
-        account: Optional[SocialAccount] = None,
-        token: Optional[SocialToken] = None,
-        email_addresses: Optional[List[EmailAddress]] = None,
+        user: AbstractBaseUser | None = None,
+        account: SocialAccount | None = None,
+        token: SocialToken | None = None,
+        email_addresses: list[EmailAddress] | None = None,
         provider=None,
-        phone: Optional[str] = None,
+        phone: str | None = None,
         phone_verified: bool = False,
-    ):
+    ) -> None:
         self.provider = provider
         if token:
             assert token.account is None or token.account == account  # nosec
@@ -235,7 +233,7 @@ class SocialLogin:
         self.phone = phone
         self.phone_verified = phone_verified
 
-    def connect(self, request, user) -> None:
+    def connect(self, request: HttpRequest, user: AbstractBaseUser) -> None:
         self.user = user
         self.save(request, connect=True)
         signals.social_account_added.send(
@@ -255,7 +253,7 @@ class SocialLogin:
     def is_headless(self) -> bool:
         return bool(self.state.get("headless"))
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         serialize_instance = get_adapter().serialize_instance
         ret = dict(
             provider=self.provider.serialize(),
@@ -271,7 +269,7 @@ class SocialLogin:
         return ret
 
     @classmethod
-    def deserialize(cls, data: Dict[str, Any]) -> "SocialLogin":
+    def deserialize(cls, data: dict[str, Any]) -> SocialLogin:
         from allauth.socialaccount.providers.base.provider import Provider
 
         if not isinstance(data, dict):
@@ -301,14 +299,15 @@ class SocialLogin:
         ret.phone_verified = data.get("phone_verified", False)
         return ret
 
-    def save(self, request, connect: bool = False) -> None:
+    def save(self, request: HttpRequest, connect: bool = False) -> None:
         """
         Saves a new account. Note that while the account is new,
         the user may be an existing one (when connecting accounts)
         """
         user = self.user
+        assert user  # nosec
         user.save()
-        self.account.user = user
+        self.account.user = user  # type:ignore[assignment]
         self.account.save()
         if app_settings.STORE_TOKENS and self.token:
             self.token.account = self.account
@@ -328,7 +327,7 @@ class SocialLogin:
         """When `False`, this social login represents a temporary account, not
         yet backed by a database record.
         """
-        if self.user.pk is None:
+        if not self.user or self.user.pk is None:
             return False
         return get_user_model().objects.filter(pk=self.user.pk).exists()
 
@@ -384,54 +383,21 @@ class SocialLogin:
             self.token.save()
 
     def _lookup_by_email(self) -> None:
-        emails = [e.email for e in self.email_addresses if e.verified]
-        for email in emails:
-            if not get_adapter().can_authenticate_by_email(self, email):
-                continue
-            users = filter_users_by_email(email, prefer_verified=True)
-            if users:
-                self.user = users[0]
-                self._did_authenticate_by_email = email
-                return
+        user_email = get_adapter().authenticate_by_email(self)
+        if user_email:
+            self.user = user_email[0]
+            self._did_authenticate_by_email = user_email[1]
 
-    def _accept_login(self, request) -> None:
+    def _accept_login(self, request: HttpRequest) -> None:
         from allauth.socialaccount.internal.flows.email_authentication import (
             wipe_password,
         )
 
-        if self._did_authenticate_by_email:
+        if self._did_authenticate_by_email and self.user:
             wipe_password(request, self.user, self._did_authenticate_by_email)
             if app_settings.EMAIL_AUTHENTICATION_AUTO_CONNECT:
                 self.connect(context.request, self.user)
 
-    def get_redirect_url(self, request) -> Optional[str]:
+    def get_redirect_url(self, request: HttpRequest) -> str | None:
         url = self.state.get("next")
         return url
-
-    @classmethod
-    def state_from_request(cls, request) -> Dict[str, Any]:
-        """
-        TODO: Deprecated! To be integrated with provider.redirect()
-        """
-        state = {}
-        next_url = get_next_redirect_url(request)
-        if next_url:
-            state["next"] = next_url
-        state["process"] = get_request_param(request, "process", "login")
-        state["scope"] = get_request_param(request, "scope", "")
-        state["auth_params"] = get_request_param(request, "auth_params", "")
-        return state
-
-    @classmethod
-    def stash_state(cls, request, state: Optional[Dict[str, Any]] = None) -> str:
-        if state is None:
-            # Only for providers that don't support redirect() yet.
-            state = cls.state_from_request(request)
-        return statekit.stash_state(request, state)
-
-    @classmethod
-    def unstash_state(cls, request) -> Optional[Dict[str, Any]]:
-        state = statekit.unstash_last_state(request)
-        if state is None:
-            raise PermissionDenied()
-        return state

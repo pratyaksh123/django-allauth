@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
 from allauth.socialaccount.providers.tumblr_oauth2.views import TumblrOAuth2Adapter
@@ -5,7 +7,7 @@ from allauth.socialaccount.providers.tumblr_oauth2.views import TumblrOAuth2Adap
 
 class TumblrAccount(ProviderAccount):
     def get_profile_url(self):
-        return "https://%s.tumblr.com/" % self.account.extra_data.get("name")
+        return f"https://{self.account.extra_data.get('name')}.tumblr.com/"
 
 
 class TumblrOAuth2Provider(OAuth2Provider):
@@ -15,7 +17,7 @@ class TumblrOAuth2Provider(OAuth2Provider):
     oauth2_adapter_class = TumblrOAuth2Adapter
 
     def extract_uid(self, data):
-        return data["name"]
+        return next(blog["uuid"] for blog in data["blogs"] if blog.get("primary"))
 
     def extract_common_fields(self, data):
         return dict(

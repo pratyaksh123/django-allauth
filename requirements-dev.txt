@@ -1,12 +1,12 @@
 # Install the package itself with all extras
--e ".[headless,socialaccount,mfa,idp-oidc,openid,steam,saml]"
+-e .[headless,socialaccount,mfa,idp-oidc,openid,steam,saml]
 
 Sphinx
 sphinx_rtd_theme
 
 # Testing tools
 pytest>=7.4
-pytest-asyncio==0.23.8
+pytest-asyncio==1.3.0
 pytest-django>=4.5.2
 pytest-cov
 
@@ -14,14 +14,14 @@ pytest-cov
 isort==5.13.2
 bandit>=1.8.6,<2
 black==24.4.0
-djlint==1.34.1
+djlint==1.36.4
 flake8>=7.3.0,<8
-mypy==1.10.0
+mypy==1.19.1
 
 # Type stubs
-django-stubs==5.0.2
-types-requests==2.32.0.20240602
-oauthlib>=3.3.0,<4
+django-stubs==5.2.9
+types-requests==2.32.4.20260107
+oauthlib>=4.0.1,<5
 Pillow>=9.0
 psycopg[binary]>=3.2.10
 djangorestframework>=3.15.2,<4

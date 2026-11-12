@@ -1,14 +1,19 @@
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
 import secrets
 import struct
 import time
-from typing import Iterator
+from collections.abc import Iterator
 
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.core.cache import cache
+from django.http import HttpRequest
 
 from allauth.core import context
+from allauth.core.internal.cryptokit import compare_user_code, normalize_user_code
 from allauth.mfa import app_settings
 from allauth.mfa.models import Authenticator
 from allauth.mfa.utils import decrypt, encrypt
@@ -29,6 +34,10 @@ def get_totp_secret(regenerate: bool = False) -> str:
     if not secret:
         secret = context.request.session[SECRET_SESSION_KEY] = generate_totp_secret()
     return secret
+
+
+def clear_totp_secret(request: HttpRequest) -> None:
+    request.session.pop(SECRET_SESSION_KEY, None)
 
 
 def yield_hotp_counters_from_time() -> Iterator[int]:
@@ -70,7 +79,7 @@ def validate_totp_code(secret: str, code: str) -> bool:
     counters = yield_hotp_counters_from_time()
     for counter in counters:
         value = hotp_value(secret, counter)
-        if code == format_hotp_value(value):
+        if compare_user_code(actual=code, expected=format_hotp_value(value)):
             return True
     return False
 
@@ -80,9 +89,11 @@ class TOTP:
         self.instance = instance
 
     @classmethod
-    def activate(cls, user, secret: str) -> "TOTP":
+    def activate(cls, user: AbstractBaseUser, secret: str) -> TOTP:
         instance = Authenticator(
-            user=user, type=Authenticator.Type.TOTP, data={"secret": encrypt(secret)}
+            user=user,  # type:ignore[misc]
+            type=Authenticator.Type.TOTP,
+            data={"secret": encrypt(secret)},
         )
         instance.save()
         return cls(instance)
@@ -90,20 +101,18 @@ class TOTP:
     def validate_code(self, code: str) -> bool:
         if _is_insecure_bypass(code):
             return True
-        if self._is_code_used(code):
-            return False
 
         secret = decrypt(self.instance.data["secret"])
         valid = validate_totp_code(secret, code)
-        if valid:
-            self._mark_code_used(code)
-        return valid
+        if not valid:
+            return False
+        return self._mark_code_used(code)
 
     def _get_used_cache_key(self, code: str) -> str:
-        return f"allauth.mfa.totp.used?user={self.instance.user_id}&code={code}"
+        return f"allauth.mfa.totp.used?user={self.instance.user_id}&code={normalize_user_code(code)}"
 
-    def _is_code_used(self, code: str) -> bool:
-        return cache.get(self._get_used_cache_key(code)) == "y"
-
-    def _mark_code_used(self, code: str) -> None:
-        cache.set(self._get_used_cache_key(code), "y", timeout=app_settings.TOTP_PERIOD)
+    def _mark_code_used(self, code: str) -> bool:
+        # A code remains valid for every counter in the tolerance window, so
+        # the used-code marker must cover the entire window.
+        timeout = app_settings.TOTP_PERIOD * (2 * app_settings.TOTP_TOLERANCE + 1)
+        return cache.add(self._get_used_cache_key(code), "y", timeout=timeout)

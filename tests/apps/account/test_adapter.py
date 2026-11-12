@@ -1,15 +1,39 @@
+import sys
 from http import HTTPStatus
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from django.core.exceptions import PermissionDenied
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 
+import pytest
+
 from allauth.account.adapter import DefaultAccountAdapter
+from allauth.account.authentication import get_authentication_records
 from allauth.core.exceptions import ImmediateHttpResponse
 
 
 class PreLoginRedirectAccountAdapter(DefaultAccountAdapter):
     def pre_login(self, *args, **kwargs):
         raise ImmediateHttpResponse(HttpResponseRedirect("/foo"))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_is_open_for_signup(settings, rf, enabled):
+    settings.ACCOUNT_SIGNUP_ENABLED = enabled
+    request = rf.get("/")
+    assert DefaultAccountAdapter(request).is_open_for_signup(request) is enabled
+
+
+def test_login_attempts_cache_key_uses_lowered_login(db, rf):
+    adapter = DefaultAccountAdapter()
+    site = SimpleNamespace(domain="example.com")
+    with (patch("allauth.account.adapter.get_current_site", return_value=site),):
+        plain = adapter._get_login_attempts_cache_key(rf.get("/"), username="Admin")
+        accented = adapter._get_login_attempts_cache_key(rf.get("/"), username="Ádmin")
+    assert plain == "example.com:admin"
+    assert accented == "example.com:ádmin"
 
 
 def test_adapter_pre_login(settings, user, user_password, client):
@@ -22,3 +46,73 @@ def test_adapter_pre_login(settings, user, user_password, client):
     )
     assert resp.status_code == HTTPStatus.FOUND
     assert resp["location"] == "/foo"
+    records = get_authentication_records(resp.wsgi_request, user)
+    assert [record["method"] for record in records] == ["password"]
+
+
+@pytest.mark.parametrize(
+    "x_forwarded_for,expected_ip",
+    [
+        ("", None),
+        ("192.168.1.1", "192.168.1.1"),
+        (" 192.168.1.1", "192.168.1.1"),
+        ("192.168.1.1 ", "192.168.1.1"),
+        (" 192.168.1.1:12345 ", "192.168.1.1"),
+        (" [2001:db8::1:0]:12345 ", "2001:db8::1:0"),
+        ("192.168.1.1:12345", "192.168.1.1"),
+        (
+            "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+            "2001:db8:85a3::8a2e:370:7334",
+        ),
+        (
+            "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:12345",
+            "2001:db8:85a3::8a2e:370:7334",
+        ),
+        ("2001:db8::1:0", "2001:db8::1:0"),
+        ("[2001:db8::1:0]:12345", "2001:db8::1:0"),
+        ("::abc:7:def", "::abc:7:def"),
+        ("::1", "::1"),
+        ("[::1]:12345", "::1"),
+    ]
+    + (
+        [
+            # not supported by ipaddress py3.8
+            ("fe80::1234%1", "fe80::1234%1"),
+        ]
+        if sys.version_info >= (3, 9)
+        else []
+    ),
+)
+def test_get_client_ip_vs_x_forwarded_for(rf, x_forwarded_for, expected_ip, settings):
+    settings.ALLAUTH_TRUSTED_PROXY_COUNT = 1
+    request = rf.get("/", HTTP_X_FORWARDED_FOR=x_forwarded_for)
+    ip = DefaultAccountAdapter(request=request).get_client_ip(request)
+    assert ip == (expected_ip if expected_ip else request.META["REMOTE_ADDR"])
+
+
+@pytest.mark.parametrize(
+    "x_forwarded_for",
+    [
+        " ",
+        "999.999.999.999",
+        "[999.999.999.999]",
+        "999.999.999.999:12345",
+        "[999.999.999.999]:12345",
+        "[192.0.0.2]",
+        "[192.0.0.2]:12345",
+        "192.[0].0.2",
+        "192.[0].0.2:12345",
+        "192.[0.0].2:12345",
+        "[192.[0.0].2:12345",
+        "2001:db8::1:0:12345",
+        "[2001:db8::1:0:12345]",
+        "2001:0db8:85a3:0000:0000:8a2e:0370:12345",
+        "[2001:0db8:85a3:0000:0000:8a2e:0370]:7334:12345",
+        "XwDxNk4JQhUft')) OR 18=(SELECT 18 FROM PG_SLEEP(15))--",
+    ],
+)
+def test_get_client_ip_vs_invalid_x_forwarded_for(rf, x_forwarded_for, settings):
+    settings.ALLAUTH_TRUSTED_PROXY_COUNT = 1
+    request = rf.get("/", HTTP_X_FORWARDED_FOR=x_forwarded_for)
+    with pytest.raises(PermissionDenied):
+        DefaultAccountAdapter(request=request).get_client_ip(request)

@@ -17,6 +17,8 @@ htmlcov/
 .coverage
 .coverage.*
 coverage.xml
+.mypy_cache/
+.nox/
 
 .ropeproject/*
 pep8.txt
@@ -43,3 +45,5 @@ devenv.local.nix
 
 # pre-commit
 .pre-commit-config.yaml
+/.agent-shell/
+.venv

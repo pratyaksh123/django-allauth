@@ -283,7 +283,7 @@ def test_add_with_reauthentication(auth_client, user, user_password, settings):
     assert resp.status_code == HTTPStatus.FOUND
     assert (
         resp["location"]
-        == reverse("account_reauthenticate") + "?next=%2Faccounts%2Femail%2F"
+        == f"{reverse('account_reauthenticate')}?next=%2Faccounts%2Femail%2F"
     )
     resp = auth_client.post(resp["location"], {"password": user_password})
     assert EmailAddress.objects.filter(email="john3@example.org").exists()
@@ -394,7 +394,7 @@ def test_remove_email(
     ],
 )
 def test_dont_lookup_invalid_email(auth_client, email, did_look_up):
-    with patch("allauth.account.views.EmailAddress.objects.get_for_user") as gfu_mock:
+    with patch("allauth.account.models.EmailAddress.objects.get_for_user") as gfu_mock:
         gfu_mock.side_effect = EmailAddress.DoesNotExist
         auth_client.post(
             reverse("account_email"),
@@ -501,3 +501,76 @@ def test_change_email_links_restrict_email(user_factory, client, settings, mailo
     email_address = EmailAddress.objects.get(user=user)
     assert email_address.verified
     assert email_address.email == "change-to@that.org"
+
+
+def test_change_unverified_email(user_factory, client, settings, mailoutbox):
+    settings.ACCOUNT_CHANGE_EMAIL = True
+    settings.ACCOUNT_EMAIL_CONFIRMATION_HMAC = True
+    settings.ACCOUNT_EMAIL_NOTIFICATIONS = True
+
+    user = user_factory(email_verified=False)
+    client.force_login(user)
+    current_email = EmailAddress.objects.get(user=user)
+    assert user.email == current_email.email
+    resp = client.post(
+        reverse("account_email"),
+        {"action_add": "", "email": "change-to@this.org"},
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert len(mailoutbox) == 1
+    assert not EmailAddress.objects.filter(pk=current_email.pk).exists()
+    user.refresh_from_db()
+    assert user.email == ""
+    assert mailoutbox[0].subject == "[example.com] Please Confirm Your Email Address"
+    new_email = EmailAddress.objects.get(email="change-to@this.org")
+    key = EmailConfirmationHMAC(new_email).key
+    with patch("allauth.account.signals.email_changed.send") as email_changed_mock:
+        resp = client.post(reverse("account_confirm_email", args=[key]))
+    assert resp.status_code == HTTPStatus.FOUND
+    assert not EmailAddress.objects.filter(pk=current_email.pk).exists()
+    assert EmailAddress.objects.filter(user=user).count() == 1
+    new_email.refresh_from_db()
+    assert new_email.verified
+    assert new_email.primary
+    assert email_changed_mock.called
+
+
+def test_change_unverified_email_to_verified_email_of_other_user(
+    user_factory, client, settings, mailoutbox
+):
+    settings.ACCOUNT_CHANGE_EMAIL = True
+    settings.ACCOUNT_EMAIL_CONFIRMATION_HMAC = True
+    settings.ACCOUNT_EMAIL_NOTIFICATIONS = True
+
+    verified_user = user_factory(email_verified=True)
+
+    user = user_factory(email_verified=False)
+    client.force_login(user)
+    current_email = EmailAddress.objects.get(user=user)
+    assert user.email == current_email.email
+    resp = client.post(
+        reverse("account_email"),
+        {"action_add": "", "email": verified_user.email},
+    )
+
+    assert resp.status_code == HTTPStatus.FOUND
+    assert len(mailoutbox) == 1
+    assert not EmailAddress.objects.filter(pk=current_email.pk).exists()
+    user.refresh_from_db()
+    assert user.email == ""
+    assert mailoutbox[0].subject == "[example.com] Please Confirm Your Email Address"
+    new_email = EmailAddress.objects.get(
+        user=user, verified=False, email=verified_user.email
+    )
+    key = EmailConfirmationHMAC(new_email).key
+    with patch("allauth.account.signals.email_changed.send") as email_changed_mock:
+        resp = client.post(reverse("account_confirm_email", args=[key]))
+    assert resp.status_code == HTTPStatus.FOUND
+
+    last_message = list(resp.context["messages"])[-1]
+    assert last_message.message.startswith("Unable to confirm")
+
+    assert EmailAddress.objects.filter(user=user).count() == 1
+    new_email.refresh_from_db()
+    assert not new_email.verified
+    assert not email_changed_mock.called

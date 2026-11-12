@@ -1,13 +1,14 @@
-from typing import Optional
+from __future__ import annotations
 
+from django.http import HttpRequest
 from django.utils.functional import cached_property
 
-from allauth.account import app_settings
+from allauth.account import app_settings, signals
 from allauth.account.adapter import get_adapter
 from allauth.account.internal.flows.code_verification import (
     AbstractCodeVerificationProcess,
 )
-from allauth.account.internal.stagekit import clear_login
+from allauth.account.internal.stagekit import clear_login, pop_login
 from allauth.account.internal.userkit import did_user_login, user_email
 from allauth.account.models import EmailAddress
 from allauth.core import context
@@ -17,7 +18,7 @@ EMAIL_VERIFICATION_CODE_SESSION_KEY = "account_email_verification_code"
 
 
 class EmailVerificationProcess(AbstractCodeVerificationProcess):
-    def __init__(self, request, state: dict, user=None) -> None:
+    def __init__(self, request: HttpRequest, state: dict, user=None) -> None:
         self.request = request
         super().__init__(
             state=state,
@@ -30,12 +31,26 @@ class EmailVerificationProcess(AbstractCodeVerificationProcess):
     def email(self) -> str:
         return self.state["email"]
 
+    def record_invalid_attempt(self) -> bool:
+        has_attempts_left = super().record_invalid_attempt()
+        if self.user:
+            signals.email_verification_code_rejected.send(
+                sender=EmailVerificationProcess,
+                request=self.request,
+                user=self.user,
+                last_attempt=not has_attempts_left,
+            )
+        return has_attempts_left
+
     def persist(self) -> None:
         self.request.session[EMAIL_VERIFICATION_CODE_SESSION_KEY] = self.state
 
     def abort(self) -> None:
         self.request.session.pop(EMAIL_VERIFICATION_CODE_SESSION_KEY, None)
-        clear_login(self.request)
+        if self.request.user.is_authenticated:
+            pop_login(self.request)
+        else:
+            clear_login(self.request)
 
     def send(self, skip_enumeration_mails: bool = False) -> None:
         from allauth.account.internal.flows.email_verification import (
@@ -62,10 +77,13 @@ class EmailVerificationProcess(AbstractCodeVerificationProcess):
         try:
             email_address = EmailAddress.objects.get_for_user(self.user, email)
         except EmailAddress.DoesNotExist:
-            email_address = EmailAddress(user=self.user, email=email)
+            email_address = EmailAddress(
+                user=self.user,  # type:ignore[misc]
+                email=email,
+            )
         return email_address
 
-    def finish(self) -> Optional[EmailAddress]:
+    def finish(self) -> EmailAddress | None:
         from allauth.account.internal.flows.email_verification import (
             mark_email_address_as_verified,
         )
@@ -79,7 +97,9 @@ class EmailVerificationProcess(AbstractCodeVerificationProcess):
         self.state["code"] = get_adapter().generate_email_verification_code()
 
     @classmethod
-    def initiate(cls, *, request, user, email: str) -> "EmailVerificationProcess":
+    def initiate(
+        cls, *, request: HttpRequest, user, email: str
+    ) -> EmailVerificationProcess:
         state = cls.initial_state(user, email)
         process = EmailVerificationProcess(request=request, user=user, state=state)
         process.generate_code()
@@ -88,7 +108,7 @@ class EmailVerificationProcess(AbstractCodeVerificationProcess):
         return process
 
     @classmethod
-    def resume(cls, request) -> Optional["EmailVerificationProcess"]:
+    def resume(cls, request: HttpRequest) -> EmailVerificationProcess | None:
         if not app_settings.EMAIL_VERIFICATION_BY_CODE_ENABLED:
             return None
         state = request.session.get(EMAIL_VERIFICATION_CODE_SESSION_KEY)
@@ -106,14 +126,14 @@ class EmailVerificationProcess(AbstractCodeVerificationProcess):
             not self.is_change_quota_reached(
                 app_settings.EMAIL_VERIFICATION_MAX_CHANGE_COUNT
             )
-            and bool(self.user)
+            and self.user is not None
             and not did_user_login(self.user)
         )
 
     def change_to(self, email: str, account_already_exists: bool) -> None:
         self.state["account_already_exists"] = account_already_exists
         self.generate_code()
-        if account_already_exists:
+        if account_already_exists or not self.user:
             pass
         else:
             EmailAddress.objects.add_new_email(
@@ -137,5 +157,5 @@ class EmailVerificationProcess(AbstractCodeVerificationProcess):
         self.persist()
 
     @property
-    def key(self):
+    def key(self) -> str:
         return self.code

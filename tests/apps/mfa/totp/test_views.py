@@ -11,9 +11,10 @@ import pytest
 from pytest_django.asserts import assertTemplateUsed
 
 from allauth.account import app_settings
-from allauth.account.authentication import AUTHENTICATION_METHODS_SESSION_KEY
+from allauth.account.authentication import get_authentication_records
 from allauth.mfa.adapter import get_adapter
 from allauth.mfa.models import Authenticator
+from allauth.mfa.totp.internal.auth import SECRET_SESSION_KEY
 
 
 def test_activate_totp_with_incorrect_code(auth_client, reauthentication_bypass):
@@ -28,6 +29,31 @@ def test_activate_totp_with_incorrect_code(auth_client, reauthentication_bypass)
     assert resp.context["form"].errors == {
         "code": [get_adapter().error_messages["incorrect_code"]]
     }
+
+
+def test_activate_totp_rate_limit(
+    auth_client, reauthentication_bypass, settings, enable_cache
+):
+    settings.ACCOUNT_LOGIN_ATTEMPTS_LIMIT = 1
+    with reauthentication_bypass():
+        auth_client.get(reverse("mfa_activate_totp"))
+        for i in range(2):
+            is_locked = i >= 1
+            resp = auth_client.post(
+                reverse("mfa_activate_totp"),
+                {
+                    "code": "wrong",
+                },
+            )
+            assert resp.context["form"].errors == {
+                "code": [
+                    (
+                        "Be patient, you are sending too many requests."
+                        if is_locked
+                        else "Incorrect code."
+                    )
+                ]
+            }
 
 
 @pytest.mark.parametrize("email_verified", [False])
@@ -50,17 +76,19 @@ def test_activate_totp_success(
     reauthentication_bypass,
     settings,
     mailoutbox,
+    django_capture_on_commit_callbacks,
 ):
     settings.ACCOUNT_EMAIL_NOTIFICATIONS = True
     with reauthentication_bypass():
         resp = auth_client.get(reverse("mfa_activate_totp"))
         with totp_validation_bypass():
-            resp = auth_client.post(
-                reverse("mfa_activate_totp"),
-                {
-                    "code": "123",
-                },
-            )
+            with django_capture_on_commit_callbacks(execute=True):
+                resp = auth_client.post(
+                    reverse("mfa_activate_totp"),
+                    {
+                        "code": "123",
+                    },
+                )
     assert resp["location"] == reverse("mfa_view_recovery_codes")
     assert Authenticator.objects.filter(
         user=user, type=Authenticator.Type.TOTP
@@ -71,6 +99,39 @@ def test_activate_totp_success(
     assert len(mailoutbox) == 1
     assert "Authenticator App Activated" in mailoutbox[0].subject
     assert "Authenticator app activated." in mailoutbox[0].body
+    assert SECRET_SESSION_KEY not in auth_client.session
+
+
+def test_activate_totp_rolls_back_when_recovery_code_creation_fails(
+    auth_client,
+    totp_validation_bypass,
+    user,
+    reauthentication_bypass,
+    mailoutbox,
+    django_capture_on_commit_callbacks,
+):
+    with reauthentication_bypass():
+        auth_client.get(reverse("mfa_activate_totp"))
+        with (
+            totp_validation_bypass(),
+            patch(
+                "allauth.mfa.totp.internal.flows.auto_generate_recovery_codes",
+                side_effect=RuntimeError,
+            ),
+            patch(
+                "allauth.mfa.totp.internal.flows.signals.authenticator_added"
+            ) as added_signal,
+            django_capture_on_commit_callbacks(execute=True),
+            pytest.raises(RuntimeError),
+        ):
+            auth_client.post(reverse("mfa_activate_totp"), {"code": "123"})
+
+    assert not Authenticator.objects.filter(
+        user=user, type=Authenticator.Type.TOTP
+    ).exists()
+    assert not added_signal.send.called
+    assert not mailoutbox
+    assert SECRET_SESSION_KEY in auth_client.session
 
 
 def test_deactivate_totp_success(
@@ -124,9 +185,51 @@ def test_totp_login(client, user_with_totp, user_password, totp_validation_bypas
         )
     assert resp.status_code == HTTPStatus.FOUND
     assert resp["location"] == settings.LOGIN_REDIRECT_URL
-    assert client.session[AUTHENTICATION_METHODS_SESSION_KEY] == [
-        {"method": "password", "at": ANY, "username": user_with_totp.username},
-        {"method": "mfa", "at": ANY, "id": ANY, "type": Authenticator.Type.TOTP},
+    assert get_authentication_records(resp.wsgi_request, user_with_totp) == [
+        {
+            "method": "password",
+            "at": ANY,
+            "username": user_with_totp.username,
+        },
+        {
+            "method": "mfa",
+            "at": ANY,
+            "id": ANY,
+            "type": Authenticator.Type.TOTP,
+        },
+    ]
+
+
+def test_cancel_mfa_login_clears_authentication_records(
+    client, user_with_totp, user_factory, user_password
+):
+    resp = client.post(
+        reverse("account_login"),
+        {"login": user_with_totp.username, "password": user_password},
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("mfa_authenticate")
+
+    resp = client.post(
+        reverse("account_logout"),
+        {"next": reverse("account_login")},
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("account_login")
+
+    other_user = user_factory()
+    resp = client.post(
+        reverse("account_login"),
+        {"login": other_user.username, "password": user_password},
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == settings.LOGIN_REDIRECT_URL
+    assert get_authentication_records(resp.wsgi_request, other_user) == [
+        {
+            "method": "password",
+            "at": ANY,
+            "username": other_user.username,
+        }
     ]
 
 
@@ -142,12 +245,19 @@ def test_totp_login_rate_limit(
     assert resp["location"] == reverse("mfa_authenticate")
     for i in range(5):
         is_locked = i >= 3
-        resp = client.post(
-            reverse("mfa_authenticate"),
-            {
-                "code": "wrong",
-            },
-        )
+        with patch("allauth.mfa.signals.authentication_failed") as auth_failed_signal:
+            resp = client.post(
+                reverse("mfa_authenticate"),
+                {
+                    "code": "wrong",
+                },
+            )
+            signal_called = not is_locked
+            assert auth_failed_signal.send.called == signal_called
+            if signal_called:
+                signal_kwargs = auth_failed_signal.send.call_args[1]
+                assert signal_kwargs["user"] == user_with_totp
+                assert signal_kwargs["reauthentication"] is False
         assert resp.context["form"].errors == {
             "code": [
                 (
@@ -221,6 +331,56 @@ def test_totp_code_reuse(
             assert resp.context["form"].errors == {
                 "code": [get_adapter().error_messages["incorrect_code"]]
             }
+
+
+@pytest.mark.parametrize("code", ["123-456", "1 23456"])
+def test_totp_code_reuse_with_alternate_representation(
+    user_with_totp,
+    user_password,
+    totp_validation_bypass,
+    enable_cache,
+    code,
+):
+    for submitted_code, expect_success in [("123456", True), (code, False)]:
+        client = Client()
+        resp = client.post(
+            reverse("account_login"),
+            {"login": user_with_totp.username, "password": user_password},
+        )
+        assert resp.status_code == HTTPStatus.FOUND
+        assert resp["location"] == reverse("mfa_authenticate")
+        with totp_validation_bypass():
+            resp = client.post(
+                reverse("mfa_authenticate"),
+                {"code": submitted_code},
+            )
+
+        if expect_success:
+            assert resp.status_code == HTTPStatus.FOUND
+            assert resp["location"] == settings.LOGIN_REDIRECT_URL
+        else:
+            assert resp.status_code == HTTPStatus.OK
+            assert resp.context["form"].errors == {
+                "code": [get_adapter().error_messages["incorrect_code"]]
+            }
+
+
+@pytest.mark.parametrize("code", ["123-456", "1 23456"])
+def test_activate_totp_normalizes_code(
+    auth_client,
+    user,
+    reauthentication_bypass,
+    code,
+):
+    with reauthentication_bypass():
+        auth_client.get(reverse("mfa_activate_totp"))
+        with patch("allauth.mfa.totp.internal.auth.hotp_value", return_value=123456):
+            resp = auth_client.post(reverse("mfa_activate_totp"), {"code": code})
+
+    assert resp.status_code == HTTPStatus.FOUND
+    assert Authenticator.objects.filter(
+        user=user, type=Authenticator.Type.TOTP
+    ).exists()
 
 
 def test_totp_stage_expires(client, user_with_totp, user_password):

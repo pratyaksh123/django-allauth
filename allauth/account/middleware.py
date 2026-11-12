@@ -1,8 +1,11 @@
-import os
+from __future__ import annotations
+
+import posixpath
 from http import HTTPStatus
 from types import SimpleNamespace
 
-from django.http import HttpResponseRedirect
+from django.core.exceptions import PermissionDenied
+from django.http import HttpRequest, HttpResponseRedirect
 from django.urls import NoReverseMatch, reverse
 from django.utils.decorators import sync_and_async_middleware
 
@@ -18,39 +21,45 @@ from allauth.core.exceptions import ImmediateHttpResponse, ReauthenticationRequi
 def AccountMiddleware(get_response):
     if iscoroutinefunction(get_response):
 
-        async def middleware(request):
-            request.allauth = SimpleNamespace()
+        async def async_middleware(request: HttpRequest):
+            request.allauth = SimpleNamespace()  # type:ignore[attr-defined]
             with context.request_context(request):
                 response = await get_response(request)
                 if _should_redirect_accounts(request, response):
                     response = await _aredirect_accounts(request)
                 return response
 
+        middleware = async_middleware
     else:
 
-        def middleware(request):
-            request.allauth = SimpleNamespace()
+        def sync_middleware(request: HttpRequest):
+            request.allauth = SimpleNamespace()  # type:ignore[attr-defined]
             with context.request_context(request):
                 response = get_response(request)
                 if _should_redirect_accounts(request, response):
                     response = _redirect_accounts(request)
                 return response
 
-    def process_exception(request, exception):
+        middleware = sync_middleware
+
+    def process_exception(request: HttpRequest, exception):
         if isinstance(exception, ImmediateHttpResponse):
             return exception.response
         elif isinstance(exception, ReauthenticationRequired):
-            redirect_url = reverse("account_login")
-            methods = get_adapter().get_reauthentication_methods(request.user)
-            if methods:
+            if request.user.is_authenticated:
+                methods = get_adapter().get_reauthentication_methods(request.user)
+                if not methods:
+                    raise PermissionDenied
                 redirect_url = methods[0]["url"]
+            else:
+                redirect_url = reverse("account_login")
             return flows.reauthentication.suspend_request(request, redirect_url)
 
     middleware.process_exception = process_exception
     return middleware
 
 
-def _should_redirect_accounts(request, response) -> bool:
+def _should_redirect_accounts(request: HttpRequest, response) -> bool:
     """
     URLs should be hackable. Yet, assuming allauth is included like this...
 
@@ -69,8 +78,8 @@ def _should_redirect_accounts(request, response) -> bool:
     except NoReverseMatch:
         # Project might have deviated URLs, let's keep out of the way.
         return False
-    prefix = os.path.commonprefix([login_path, email_path])
-    if len(prefix) <= 1 or prefix != request.path:
+    prefix = posixpath.commonpath([login_path, email_path])
+    if prefix == "/" or f"{prefix}/" != request.path:
         return False
     # If we have a prefix that is not just '/', and that is what our request is
     # pointing to, redirect.
@@ -78,11 +87,11 @@ def _should_redirect_accounts(request, response) -> bool:
 
 
 @sync_to_async
-def _async_get_user(request):
+def _async_get_user(request: HttpRequest):
     return request.user
 
 
-async def _aredirect_accounts(request) -> HttpResponseRedirect:
+async def _aredirect_accounts(request: HttpRequest) -> HttpResponseRedirect:
     email_path = reverse("account_email")
     login_path = reverse("account_login")
     if hasattr(request, "auser"):
@@ -93,7 +102,7 @@ async def _aredirect_accounts(request) -> HttpResponseRedirect:
     return HttpResponseRedirect(email_path if user.is_authenticated else login_path)
 
 
-def _redirect_accounts(request) -> HttpResponseRedirect:
+def _redirect_accounts(request: HttpRequest) -> HttpResponseRedirect:
     email_path = reverse("account_email")
     login_path = reverse("account_login")
     user = request.user

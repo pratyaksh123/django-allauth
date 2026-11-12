@@ -1,6 +1,9 @@
-import time
-from typing import Any, Dict
+from __future__ import annotations
 
+import time
+from typing import Any
+
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.core import exceptions, validators
 from django.http import HttpRequest, HttpResponse
 
@@ -8,22 +11,43 @@ from allauth import app_settings as allauth_settings
 from allauth.account import app_settings
 from allauth.account.adapter import get_adapter
 from allauth.account.app_settings import LoginMethod
+from allauth.account.internal.userkit import user_id_to_str
 from allauth.account.models import Login
 from allauth.account.signals import authentication_step_completed
 from allauth.core.exceptions import ImmediateHttpResponse
 
 
 AUTHENTICATION_METHODS_SESSION_KEY = "account_authentication_methods"
+_AUTHENTICATION_METHODS_USER_SESSION_KEY = "account_authentication_methods_user"
 
 
-def record_authentication(request, user, method, **extra_data):
+def get_authentication_records(
+    request: HttpRequest, user: AbstractBaseUser | None = None
+) -> list[dict]:
+    if user is None or user.pk is None:
+        return []
+    stored_user_id = request.session.get(_AUTHENTICATION_METHODS_USER_SESSION_KEY)
+    user_id = user_id_to_str(user)
+    if user_id != stored_user_id:
+        return []
+    records = request.session.get(AUTHENTICATION_METHODS_SESSION_KEY)
+    if not isinstance(records, list):
+        return []
+    return records
+
+
+def record_authentication(
+    request: HttpRequest,
+    user: AbstractBaseUser | None,
+    method: str,
+    **extra_data,
+) -> None:
     """Here we keep a log of all authentication methods used within the current
     session.  Important to note is that having entries here does not imply that
     a user is fully signed in. For example, consider a case where a user
-    authenticates using a password, but fails to complete the 2FA challenge.
-    Or, a user successfully signs in into an inactive account or one that still
-    needs verification. In such cases, ``request.user`` is still anonymous, yet,
-    we do have an entry here.
+    authenticates using a password, but fails to complete the 2FA challenge. In
+    that case, ``request.user`` is still anonymous, yet, we do have an entry
+    here.
 
     Example data::
 
@@ -42,7 +66,8 @@ def record_authentication(request, user, method, **extra_data):
          'type': 'totp'}
 
     """
-    methods = request.session.get(AUTHENTICATION_METHODS_SESSION_KEY, [])
+    if user is None or not user.is_authenticated or user.pk is None:
+        return
     data = {
         "method": method,
         "at": time.time(),
@@ -50,14 +75,21 @@ def record_authentication(request, user, method, **extra_data):
     for k, v in extra_data.items():
         if v is not None:
             data[k] = v
-    methods.append(data)
-    request.session[AUTHENTICATION_METHODS_SESSION_KEY] = methods
+    records = [*get_authentication_records(request, user)]
+    records.append(data)
+    request.session[AUTHENTICATION_METHODS_SESSION_KEY] = records
+    request.session[_AUTHENTICATION_METHODS_USER_SESSION_KEY] = user_id_to_str(user)
     authentication_step_completed.send(
         sender=user.__class__, request=request, method=method, user=user, **extra_data
     )
 
 
-def _get_login_hook_kwargs(login: Login) -> Dict[str, Any]:
+def clear_authentication_records(request: HttpRequest) -> None:
+    request.session.pop(AUTHENTICATION_METHODS_SESSION_KEY, None)
+    request.session.pop(_AUTHENTICATION_METHODS_USER_SESSION_KEY, None)
+
+
+def _get_login_hook_kwargs(login: Login) -> dict[str, Any]:
     """
     TODO: Just break backwards compatibility and pass only `login` to
     `pre/post_login()`.
@@ -72,7 +104,7 @@ def _get_login_hook_kwargs(login: Login) -> Dict[str, Any]:
 
 
 def perform_password_login(
-    request: HttpRequest, credentials: Dict[str, Any], login: Login
+    request: HttpRequest, credentials: dict[str, Any], login: Login
 ) -> HttpResponse:
     extra_data = {
         field: credentials.get(field)
@@ -98,13 +130,16 @@ def resume_login(request: HttpRequest, login: Login) -> HttpResponse:
 
     adapter = get_adapter()
     ctrl = LoginStageController(request, login)
+    response: HttpResponse
     try:
         response = ctrl.handle()
         if response:
             return response
-        adapter.login(request, login.user)
+        user = login.user
+        assert user  # nosec
+        adapter.login(request, user)
         hook_kwargs = _get_login_hook_kwargs(login)
-        response = adapter.post_login(request, login.user, **hook_kwargs)
+        response = adapter.post_login(request, user, **hook_kwargs)
         if response:
             return response
     except ImmediateHttpResponse as e:
@@ -117,7 +152,7 @@ def resume_login(request: HttpRequest, login: Login) -> HttpResponse:
     return response
 
 
-def is_login_rate_limited(request, login: Login) -> bool:
+def is_login_rate_limited(request: HttpRequest, login: Login) -> bool:
     from allauth.account.internal.flows.email_verification import (
         is_verification_rate_limited,
     )

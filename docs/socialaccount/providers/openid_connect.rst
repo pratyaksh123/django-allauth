@@ -32,6 +32,14 @@ standalone OpenID Connect provider:
                         # If omitted, a method from the the server's
                         # token auth methods list is used
                         "token_auth_method": "client_secret_basic",
+                        # The field to be used as the account ID.
+                        "uid_field": "sub",
+                        # Optional overrides for the OpenID Connect
+                        # configuration fetched from the server's
+                        # .well-known/openid-configuration endpoint.
+                        "openid_configuration_overrides": {
+                            "token_endpoint": "https://my.server.example.com/custom/token",
+                        },
                     },
                 },
                 {

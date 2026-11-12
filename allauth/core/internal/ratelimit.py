@@ -1,63 +1,105 @@
 """
-Rate limiting in this implementation relies on a cache and uses non-atomic
-operations, making it vulnerable to race conditions. As a result, users may
-occasionally bypass the intended rate limit due to concurrent access. However,
-such race conditions are rare in practice. For example, if the limit is set to
-10 requests per minute and a large number of parallel processes attempt to test
-that limit, you may occasionally observe slight overruns—such as 11 or 12
-requests slipping through. Nevertheless, exceeding the limit by a large margin
-is highly unlikely due to the low probability of many processes entering the
-critical non-atomic code section simultaneously.
+See the "Deployment Requirements" over at ``docs/common/rate_limits.rst``
+for certain trade-offs made in this implementation.
 """
 
-import hashlib
-import time
-from collections import namedtuple
-from dataclasses import dataclass
-from http import HTTPStatus
-from typing import Dict, List, Optional, Tuple, Union
+from __future__ import annotations
 
+import hashlib
+import ipaddress
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import wraps
+from http import HTTPStatus
+
+from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
 from django.template.exceptions import TemplateDoesNotExist
+from django.utils.module_loading import import_string
 
+from allauth import app_settings
 from allauth.core.exceptions import RateLimited
+from allauth.utils import import_callable
 
 
-Rate = namedtuple("Rate", "amount duration per")
+@dataclass(frozen=True)
+class Rate:
+    amount: int
+    duration: float | int
+    per: str
+
+    def __str__(self) -> str:
+        return f"{self.amount}/{self.duration}/{self.per}"
+
+
+CACHE_LOCK_TIMEOUT = 10
+CACHE_LOCK_WAIT_TIMEOUT = 1
+CACHE_LOCK_RETRY_INTERVAL = 0.01
+CACHE_LOCK_MAX_RETRY_INTERVAL = 0.1
+
+
+@contextmanager
+def cache_lock(cache_key: str) -> Iterator[bool]:
+    lock_key = f"{cache_key}:lock"
+    deadline = time.monotonic() + CACHE_LOCK_WAIT_TIMEOUT
+    retry_interval = CACHE_LOCK_RETRY_INTERVAL
+    while not cache.add(lock_key, True, timeout=CACHE_LOCK_TIMEOUT):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            yield False
+            return
+        time.sleep(min(retry_interval, remaining))
+        retry_interval = min(retry_interval * 2, CACHE_LOCK_MAX_RETRY_INTERVAL)
+    try:
+        yield True
+    finally:
+        # Note that there is no guarantee that the following statement actually
+        # deletes the lock that was acquired by this process. Given that the
+        # critical section performs very few actions, and, given a sufficiently
+        # large `CACHE_LOCK_TIMEOUT`, that should normally not happen.
+        cache.delete(lock_key)
 
 
 @dataclass
 class SingleRateLimitUsage:
     cache_key: str
-    cache_duration: Union[float, int]
+    cache_duration: float | int
     timestamp: float
 
     def rollback(self) -> None:
-        history = cache.get(self.cache_key, [])
-        history = [ts for ts in history if ts != self.timestamp]
-        cache.set(self.cache_key, history, self.cache_duration)
+        with cache_lock(self.cache_key) as locked:
+            if locked:
+                history = cache.get(self.cache_key, [])
+                history = [ts for ts in history if ts != self.timestamp]
+                cache.set(self.cache_key, history, self.cache_duration)
+            else:
+                # Unable to rollback. That is nothing to worry about, skipping
+                # only makes the limit more restrictive.
+                pass
 
 
 @dataclass
 class RateLimitUsage:
-    usage: List[SingleRateLimitUsage]
+    usage: list[SingleRateLimitUsage]
 
     def rollback(self) -> None:
         for usage in self.usage:
             usage.rollback()
 
 
-def parse_duration(duration) -> Union[int, float]:
+def parse_duration(duration) -> int | float:
     if len(duration) == 0:
         raise ValueError(duration)
     unit = duration[-1]
     value = duration[0:-1]
     unit_map = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     if unit not in unit_map:
-        raise ValueError("Invalid duration unit: %s" % unit)
+        raise ValueError(f"Invalid duration unit: {unit}")
     if len(value) == 0:
         value = 1
     else:
@@ -79,7 +121,7 @@ def parse_rate(rate: str) -> Rate:
     return Rate(amount_v, duration_v, per)
 
 
-def parse_rates(rates: Optional[str]) -> List[Rate]:
+def parse_rates(rates: str | None) -> list[Rate]:
     ret = []
     if rates:
         rates = rates.strip()
@@ -90,12 +132,34 @@ def parse_rates(rates: Optional[str]) -> List[Rate]:
     return ret
 
 
-def get_cache_key(request, *, action: str, rate: Rate, key=None, user=None):
+def truncate_ip(ip: str) -> str:
+    from allauth import app_settings as allauth_settings
+
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+
+    if isinstance(addr, ipaddress.IPv6Address):
+        prefix = allauth_settings.RATE_LIMIT_IPV6_PREFIX
+        network = ipaddress.IPv6Network(f"{addr}/{prefix}", strict=False)
+        return str(network.network_address)
+    return ip
+
+
+def get_ip(request: HttpRequest) -> str:
     from allauth.account.adapter import get_adapter
 
-    source: Tuple[str, ...]
+    ip = get_adapter().get_client_ip(request)
+    return truncate_ip(ip)
+
+
+def get_cache_key(
+    request: HttpRequest, *, app: str, action: str, rate: Rate, key=None, user=None
+) -> str:
+    source: tuple[str, ...]
     if rate.per == "ip":
-        source = ("ip", get_adapter().get_client_ip(request))
+        source = ("ip", get_ip(request))
     elif rate.per == "user":
         if user is None:
             if not request.user.is_authenticated:
@@ -113,61 +177,91 @@ def get_cache_key(request, *, action: str, rate: Rate, key=None, user=None):
         source = (key_hash,)
     else:
         raise ValueError(rate.per)
-    keys = ["allauth", "rl", action, *source]
+    keys = ["allauth", "rl", app, action, str(rate), *source]
     return ":".join(keys)
 
 
+def apply_rate(
+    history: list[float], now: float, rate: Rate, *, dry_run: bool = False
+) -> tuple[bool, list[float]]:
+    """Apply ``rate`` to the hit timestamps at ``now``, returning
+    ``(allowed, history)``: expired timestamps are dropped and, unless
+    ``dry_run``, an allowed hit is recorded. I/O-free, so needs no cache.
+    """
+    while history and history[-1] <= now - rate.duration:
+        history.pop()
+    allowed = len(history) < rate.amount
+    if allowed and not dry_run:
+        history.insert(0, now)
+    return allowed, history
+
+
 def _consume_single_rate(
-    request,
+    request: HttpRequest,
     *,
+    app: str,
     action: str,
     rate: Rate,
     key=None,
     user=None,
     dry_run: bool = False,
     raise_exception: bool = False,
-) -> Optional[SingleRateLimitUsage]:
-    cache_key = get_cache_key(request, action=action, rate=rate, key=key, user=user)
-    history = cache.get(cache_key, [])
-    now = time.time()
-    while history and history[-1] <= now - rate.duration:
-        history.pop()
-    allowed = len(history) < rate.amount
-    if allowed:
-        usage = SingleRateLimitUsage(
-            cache_key=cache_key, timestamp=now, cache_duration=rate.duration
-        )
-    else:
-        usage = None
-    if allowed and not dry_run:
-        history.insert(0, now)
-        cache.set(cache_key, history, rate.duration)
-    if not allowed and raise_exception:
-        raise RateLimited
-    return usage
+) -> SingleRateLimitUsage | None:
+    cache_key = get_cache_key(
+        request, app=app, action=action, rate=rate, key=key, user=user
+    )
+    with cache_lock(cache_key) as locked:
+        if not locked:
+            if raise_exception:
+                raise RateLimited
+            return None
+        history = cache.get(cache_key, [])
+        now = time.time()
+        allowed, history = apply_rate(history, now, rate, dry_run=dry_run)
+        if allowed:
+            usage = SingleRateLimitUsage(
+                cache_key=cache_key, timestamp=now, cache_duration=rate.duration
+            )
+            if not dry_run:
+                cache.set(cache_key, history, rate.duration)
+        else:
+            usage = None
+            if raise_exception:
+                raise RateLimited
+        return usage
+
+
+def get_rates(
+    *, app: str, action: str, config: dict[str, str] | None = None
+) -> list[Rate]:
+    if config is None:
+        config = import_string(f"{app}.app_settings.RATE_LIMITS")
+    return list(dict.fromkeys(parse_rates(config.get(action))))
 
 
 def consume(
     request: HttpRequest,
     *,
+    app: str,
     action: str,
-    config: Dict[str, str],
+    config: dict[str, str] | None = None,
     key=None,
     user=None,
     dry_run: bool = False,
     limit_get: bool = False,
     raise_exception: bool = False,
-) -> Optional[RateLimitUsage]:
+) -> RateLimitUsage | None:
     usage = RateLimitUsage(usage=[])
     if (not limit_get) and request.method == "GET":
         return usage
-    rates = parse_rates(config.get(action))
+    rates = get_rates(app=app, action=action, config=config)
     if not rates:
         return usage
     allowed = True
     for rate in rates:
         single_usage = _consume_single_rate(
             request,
+            app=app,
             action=action,
             rate=rate,
             key=key,
@@ -182,13 +276,13 @@ def consume(
     return usage if allowed else None
 
 
-def handler429(request) -> HttpResponse:
+def handler429(request: HttpRequest) -> HttpResponse:
     from allauth.account import app_settings
 
     try:
         return render(
             request,
-            "429." + app_settings.TEMPLATE_EXTENSION,
+            f"429.{app_settings.TEMPLATE_EXTENSION}",
             status=HTTPStatus.TOO_MANY_REQUESTS,
         )
     except TemplateDoesNotExist:
@@ -206,8 +300,57 @@ def handler429(request) -> HttpResponse:
         )
 
 
-def clear(request, *, config: dict, action: str, key=None, user=None):
-    rates = parse_rates(config.get(action))
+def clear(
+    request: HttpRequest,
+    *,
+    app: str,
+    action: str,
+    config: dict[str, str] | None = None,
+    key=None,
+    user=None,
+) -> None:
+    rates = get_rates(app=app, action=action, config=config)
     for rate in rates:
-        cache_key = get_cache_key(request, action=action, rate=rate, key=key, user=user)
-        cache.delete(cache_key)
+        cache_key = get_cache_key(
+            request, app=app, action=action, rate=rate, key=key, user=user
+        )
+        with cache_lock(cache_key) as locked:
+            if locked:
+                cache.delete(cache_key)
+
+
+def respond_429(request: HttpRequest) -> HttpResponse:
+    if app_settings.HEADLESS_ENABLED and hasattr(
+        request.allauth,  # type:ignore[attr-defined]
+        "headless",
+    ):
+        from allauth.headless.base.response import RateLimitResponse
+
+        return RateLimitResponse(request)
+
+    try:
+        h429 = import_callable(f"{settings.ROOT_URLCONF}.handler429")
+        h429 = import_callable(h429)
+    except (ImportError, AttributeError):
+        h429 = handler429
+    return h429(request)
+
+
+def consume_or_429(request: HttpRequest, *args, **kwargs) -> HttpResponse | None:
+    if not consume(request, *args, **kwargs):
+        return respond_429(request)
+    return None
+
+
+def decorator(**rl_kwargs):
+    def f(function):
+        @wraps(function)
+        def wrap(request: HttpRequest, *args, **kwargs):
+            resp = consume_or_429(request, **rl_kwargs)
+            if not resp:
+                resp = function(request, *args, **kwargs)
+            return resp
+
+        return wrap
+
+    return f

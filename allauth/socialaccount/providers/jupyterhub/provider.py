@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.jupyterhub.views import JupyterHubOAuth2Adapter
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
@@ -14,6 +16,11 @@ class JupyterHubProvider(OAuth2Provider):
     oauth2_adapter_class = JupyterHubOAuth2Adapter
 
     def extract_uid(self, data):
+        """
+        We receive only the Hub-local name from the user endpoint. Its
+        safety depends on the authenticator and administrator not reassigning
+        usernames. There is no generic stable alternate in the response.
+        """
         return str(data.get("name"))
 
     def extract_common_fields(self, data):

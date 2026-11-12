@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import json
 from datetime import timedelta
 
-from django.http import HttpResponseNotAllowed, HttpResponseRedirect
+from django.http import HttpRequest, HttpResponseNotAllowed, HttpResponseRedirect
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import urlencode
@@ -49,37 +51,69 @@ class AppleOAuth2Adapter(OAuth2Adapter):
         if expires_in:
             token.expires_at = timezone.now() + timedelta(seconds=int(expires_in))
 
-        # `user_data` is a big flat dictionary with the parsed JWT claims
-        # access_tokens, and user info from the apple post.
         identity_data = AppleOAuth2Adapter.get_verified_identity_data(
             self.get_provider(), data["id_token"]
         )
-        token.user_data = {**data, **identity_data}
+        token._verified_identity_data = identity_data
 
         return token
 
-    def complete_login(self, request, app, token, **kwargs):
-        extra_data = token.user_data
+    def complete_login(self, request: HttpRequest, app, token, **kwargs):
+        # Apple only returns the name in the unsigned `user` form field, and
+        # only on the first authorization. Keep it separate from the signed
+        # identity claims until constructing the social profile.
+        extra_data = {
+            **token._verified_identity_data,
+            **self.get_user_scope_data(request),
+        }
         login = self.get_provider().sociallogin_from_response(
             request=request, response=extra_data
         )
-        login.state["id_token"] = token.user_data
+        login.state["id_token"] = token._verified_identity_data
 
         # We can safely remove the apple login session now
         # Note: The cookie will remain, but it's set to delete on browser close
         get_apple_session(request).delete()
         return login
 
-    def get_user_scope_data(self, request):
-        user_scope_data = request.apple_login_session.get("user", "")
+    def get_user_scope_data(self, request: HttpRequest):
+        """Returns the name Apple passes along in the ``user`` form field.
+
+        See:
+        https://developer.apple.com/documentation/signinwithapple/receiving-a-users-identity-token
+
+        > Apple doesn’t receive the user’s full name shared with the system
+        > UI. The raw data is passed directly to your app from the browser and is
+        > not included in the user’s identity token. To help prevent cross-site
+        > scripting attacks, validate and sanitize the user-submitted first and
+        > last name values before storing on your app servers.
+
+        """
+        user_scope_data = request.apple_login_session.get(  # type:ignore[attr-defined]
+            "user",
+            "",
+        )
         try:
-            return json.loads(user_scope_data)
+            data = json.loads(user_scope_data)
         except json.JSONDecodeError:
             # We do not care much about user scope data as it maybe blank
             # so return blank dictionary instead
             return {}
+        if not isinstance(data, dict):
+            return {}
+        name = data.get("name")
+        if not isinstance(name, dict):
+            return {}
+        return {
+            "name": {
+                field: name[field] if isinstance(name.get(field), str) else ""
+                for field in ("firstName", "lastName")
+            }
+        }
 
-    def get_access_token_data(self, request, app, client, pkce_code_verifier=None):
+    def get_access_token_data(
+        self, request: HttpRequest, app, client, pkce_code_verifier=None
+    ):
         """We need to gather the info from the apple specific login"""
         apple_session = get_apple_session(request)
 
@@ -96,14 +130,15 @@ class AppleOAuth2Adapter(OAuth2Adapter):
 
         return {
             **access_token_data,
-            **self.get_user_scope_data(request),
             "id_token": id_token,
         }
 
 
 @csrf_exempt
 @login_not_required
-def apple_post_callback(request, finish_endpoint_name="apple_finish_callback"):
+def apple_post_callback(
+    request: HttpRequest, finish_endpoint_name="apple_finish_callback"
+):
     """
     Apple uses a `form_post` response type, which due to
     CORS/Samesite-cookie rules means this request cannot access
@@ -136,9 +171,7 @@ def apple_post_callback(request, finish_endpoint_name="apple_finish_callback"):
         apple_session.store[key] = get_request_param(request, key, "")
 
     url = build_absolute_uri(request, reverse(finish_endpoint_name))
-    response = HttpResponseRedirect(
-        "{url}?{query}".format(url=url, query=urlencode(url_params))
-    )
+    response = HttpResponseRedirect(f"{url}?{urlencode(url_params)}")
     apple_session.save(response)
     return response
 

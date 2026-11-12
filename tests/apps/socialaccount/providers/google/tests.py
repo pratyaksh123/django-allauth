@@ -101,14 +101,13 @@ class GoogleTests(OAuth2TestsMixin, TestCase):
             "exp": time.time() - 1,
             "aud": "foo",
         }
+        template_ext = getattr(settings, "ACCOUNT_TEMPLATE_EXTENSION", "html")
         for key, value in wrong_claim_values.items():
             with self.subTest(key):
                 self.identity_overwrites = {key: value}
                 resp = self.login(resp_mock=None)
                 self.assertTemplateUsed(
-                    resp,
-                    "socialaccount/authentication_error.%s"
-                    % getattr(settings, "ACCOUNT_TEMPLATE_EXTENSION", "html"),
+                    resp, f"socialaccount/authentication_error.{template_ext}"
                 )
 
     def test_username_based_on_email(self):
@@ -139,6 +138,7 @@ class GoogleTests(OAuth2TestsMixin, TestCase):
         user_signed_up.connect(on_signed_up)
         self.login(resp_mock=None)
         self.assertTrue(len(sent_signals) > 0)
+        user_signed_up.disconnect(on_signed_up)
 
     @override_settings(ACCOUNT_EMAIL_CONFIRMATION_HMAC=False)
     def test_email_unverified(self):
@@ -236,16 +236,10 @@ class AppInSettingsTests(GoogleTests):
 
 def test_login_by_token(db, client, settings_with_google_provider):
     client.cookies.load({"g_csrf_token": "csrf"})
-    with patch(
-        "allauth.socialaccount.internal.jwtkit.jwt.get_unverified_header"
-    ) as g_u_h:
+    with patch("jwt.get_unverified_header") as g_u_h:
         with mocked_response({"dummykid": "-----BEGIN CERTIFICATE-----"}):
-            with patch(
-                "allauth.socialaccount.internal.jwtkit.load_pem_x509_certificate"
-            ) as load_pem:
-                with patch(
-                    "allauth.socialaccount.internal.jwtkit.jwt.decode"
-                ) as decode:
+            with patch("cryptography.x509.load_pem_x509_certificate") as load_pem:
+                with patch("jwt.decode") as decode:
                     decode.return_value = {
                         "iss": "https://accounts.google.com",
                         "aud": "client_id",
@@ -277,6 +271,15 @@ def test_login_by_token(db, client, settings_with_google_provider):
                     assert resp.status_code == HTTPStatus.FOUND
                     socialaccount = SocialAccount.objects.get(uid="123sub")
                     assert socialaccount.user.email == "raymond@example.com"
+
+
+def test_login_by_token_non_ascii_csrf(db, client, settings_with_google_provider):
+    client.cookies.load({"g_csrf_token": "é"})
+    response = client.post(
+        reverse("google_login_by_token"),
+        {"credential": "dummy", "g_csrf_token": "é"},
+    )
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 @pytest.mark.parametrize(
@@ -343,7 +346,7 @@ def test_complete_login_variants(
             adapter.did_fetch_access_token = did_fetch_access_token
             adapter.fetch_userinfo = fetch_userinfo
             token = SocialToken()
-            login = adapter.complete_login(request, app, token, response)
+            login = adapter.complete_login(request, app, token, response=response)
             assert login.account.uid == expected_uid
             assert login.account.extra_data["picture"] == expected_picture
             if not response.get("id_token"):

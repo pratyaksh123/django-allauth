@@ -42,8 +42,16 @@ Configuration
 
 Available settings:
 
+``HEADLESS_JWT_ALGORITHM`` (default: ``"RS256"``)
+  The algorithm used to sign the tokens. For asymmetric algorithms (e.g. ``"RS256"``),
+  the ``HEADLESS_JWT_PRIVATE_KEY`` is used as the RSA private key. For symmetric
+  algorithms (e.g. ``"HS256"``), ``HEADLESS_JWT_PRIVATE_KEY`` is used as the
+  secret. In case a symmetric algorithm is used and the private key is not
+  configured, ``settings.SECRET_KEY`` is used as a fallback.
+
 ``HEADLESS_JWT_PRIVATE_KEY`` (default: ``""``)
-  The private key used to sign the JWT tokens. It can be generated using the following command::
+  The private key (or secret) used to sign the JWT tokens. For asymmetric
+  algorithms, it can be generated using the following command::
 
     openssl genpkey -algorithm RSA -out private_key.pem -pkeyopt rsa_keygen_bits:2048
 
@@ -69,9 +77,10 @@ Available settings:
   Specifies the HTTP Authorization header scheme for access tokens, e.g.: ``Authorization: Bearer <access-token>``.
 
 ``HEADLESS_JWT_STATEFUL_VALIDATION_ENABLED`` (default: ``False``)
-  When enabled, it is validated that the access token still belongs to an
-  active session. As a result, logging out will immediately invalidate the
-  access token.
+  When enabled, access tokens are checked against the session in which they
+  were issued. The session must still exist and remain valid. As a result,
+  logging out or changing the password will immediately invalidate the access
+  token.
 
 ``HEADLESS_JWT_ROTATE_REFRESH_TOKEN`` (default: ``True``)
   When enabled, refreshing the access token results in a new refresh token
@@ -112,6 +121,19 @@ An example on how to use that security class in your own code is listed below:
     @api.get("/your/own/api", auth=[jwt_token_auth])
     def your_own_api(request):
         ...
+
+By default, a missing token is rejected. To make authentication optional,
+subclass the security class and enable anonymous users:
+
+.. code-block:: python
+
+    from allauth.headless.contrib.ninja.security import JWTTokenAuth
+
+    class OptionalJWTTokenAuth(JWTTokenAuth):
+        allow_anonymous_users = True
+
+A missing token then produces an ``AnonymousUser`` and assigns it to
+``request.user``. Invalid tokens remain rejected.
 
 
 

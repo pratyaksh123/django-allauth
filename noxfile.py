@@ -31,7 +31,7 @@ def isort(session):
 @nox.session(tags=["lint"])
 def flake8(session):
     session.install("flake8==7.2.0")
-    session.run("flake8", "allauth/")
+    session.run("flake8", "allauth/", "tests/")
 
 
 @nox.session(tags=["lint"])
@@ -42,24 +42,23 @@ def black(session):
 
 @nox.session(tags=["lint"])
 def djlint(session):
-    session.install("djlint==1.34.1")
+    session.install("djlint==1.36.4")
     session.run(
         "djlint", "--configuration", ".djlintrc", "--check", "./allauth", "./examples"
     )
 
 
 DJANGO_PYTHON_REQ = {
-    "4.2.20": ("3.8", "3.9", "3.10", "3.11", "3.12"),
-    # 5.0 is EOL
-    # "5.0": ("3.10", "3.11", "3.12"),
-    "5.1": ("3.10", "3.11", "3.12", "3.13"),
-    "5.2": ("3.10", "3.11", "3.12", "3.13", "3.14"),
+    "4.2.20": ("3.11", "3.12"),
+    "5.1": ("3.11", "3.12", "3.13"),
+    "5.2": ("3.11", "3.12", "3.13", "3.14"),
     "6.0": ("3.12", "3.13", "3.14"),
+    "6.1": ("3.12", "3.13", "3.14"),
 }
 DJANGO_LTS = "5.2"
 
 
-@nox.session(python=["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"])
+@nox.session(python=["3.11", "3.12", "3.13", "3.14"])
 @nox.parametrize("django", list(DJANGO_PYTHON_REQ.keys()))
 @nox.parametrize(
     "project", ["regular", "headless_only", "account_only", "login_required_mw"]
@@ -81,46 +80,56 @@ def test(session, django, project):
     if session.python not in DJANGO_PYTHON_REQ[django]:
         print(f"Skipping: Django {django} does not support python{session.python}")
         return
-    session.install(
-        f"django~={(django + '.0') if django != '6.0' else '6.0rc1'}",
-        "pytest>=8.3.5,<9",
-        "pytest-asyncio==0.23.8",
-        "pytest-django>=4.11,<5",
-        "Pillow>=9.0",
-        "coverage==7.6.1",
-        # SAML is disabled in CI
-        # "python3-saml==1.16.0",
-        # "xmlsec==1.3.14",
-        # "lxml==5.2.1",
-        "pyyaml>=6.0.2,<7",
-        "psycopg2-binary>=2.9.10,<3",
-        "djangorestframework>=3.15.2,<4",
-        "django-ninja>=1.3.0,<2",
-        "mypy==1.10.0",
-        ".[mfa,openid,socialaccount,steam]",  # SAML is disabled in CI
-    )
-    session.run("/bin/sh", "-c", "cd allauth; python ../manage.py compilemessages")
+    django_version = f"{django}.0" if django != "6.2" else "6.2rc1"
     run_coveralls = (
         os.environ.get("GITHUB_TOKEN")
         and project == "regular"
         and django == "5.2"
         and session.python == "3.14"
     )
-    if run_coveralls:
-        session.install("coveralls")
-    session.run(
-        "coverage",
-        "run",
-        "-m",
-        "pytest",
-        f"--ds=tests.projects.{project}.settings",
-        "tests/",
+    session.install(
+        f"django~={django_version}",
+        "pytest>=8.3.5,<9",
+        "pytest-asyncio==1.3.0",
+        # pytest-django 4.13 dropped support for Django 4.2 and 5.1.
+        "pytest-django>=4.11,<4.13",
+        "Pillow>=9.0",
+        # SAML is disabled in CI
+        # "python3-saml==1.16.0",
+        # "xmlsec==1.3.14",
+        # "lxml==5.2.1",
+        "pyyaml>=6.0.2,<7",
+        "psycopg2-binary>=2.9.10,<3",
+        # The released DRF 3.17.2 is missing the Django 6.1+ compat fix (its
+        # `cc_delim_re` import was only replaced on a post-tag main commit), so
+        # pin to that specific commit until a fixed release is out.
+        "djangorestframework @ git+https://github.com/encode/django-rest-framework@fbb02d9be78b1e232784dbb813c3fa118c1ba076",
+        "django-ninja>=1.3.0,<2",
+        "mypy==1.19.1",
+        ".[mfa,openid,socialaccount,steam]",  # SAML is disabled in CI
     )
+    session.run("/bin/sh", "-c", "cd allauth; python ../manage.py compilemessages")
+    if run_coveralls:
+        session.install("coverage==7.6.1", "coveralls")
+        session.run(
+            "coverage",
+            "run",
+            "-m",
+            "pytest",
+            f"--ds=tests.projects.{project}.settings",
+            "tests/",
+        )
+    else:
+        session.run(
+            "pytest",
+            f"--ds=tests.projects.{project}.settings",
+            "tests/",
+        )
     if run_coveralls:
         session.run("coveralls", "--service=github")
     if django == "5.2" and session.python == "3.14":
         session.install(
-            "django-stubs~=5.2.7",
-            "types-requests==2.32.4.20250913",
+            "django-stubs~=5.2.9",
+            "types-requests==2.32.4.20260107",
         )
         session.run("mypy", "allauth")

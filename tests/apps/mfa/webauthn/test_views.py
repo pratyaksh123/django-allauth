@@ -3,12 +3,15 @@ from unittest.mock import ANY
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ImproperlyConfigured
 from django.urls import reverse
 
 import pytest
 from pytest_django.asserts import assertTemplateUsed
 
-from allauth.account.authentication import AUTHENTICATION_METHODS_SESSION_KEY
+from allauth.account.authentication import get_authentication_records
+from allauth.mfa import app_settings as mfa_app_settings
+from allauth.mfa.adapter import get_adapter
 from allauth.mfa.models import Authenticator
 
 
@@ -22,7 +25,7 @@ def test_passkey_login(client, passkey, webauthn_authentication_bypass):
             reverse("mfa_login_webauthn"), data={"credential": credential}
         )
     assert resp["location"] == settings.LOGIN_REDIRECT_URL
-    assert client.session[AUTHENTICATION_METHODS_SESSION_KEY] == [
+    assert get_authentication_records(resp.wsgi_request, passkey.user) == [
         {
             "at": ANY,
             "id": ANY,
@@ -33,9 +36,70 @@ def test_passkey_login(client, passkey, webauthn_authentication_bypass):
     ]
 
 
-def test_reauthenticate(
-    auth_client, passkey, user_with_recovery_codes, webauthn_authentication_bypass
+def test_passkey_login_requires_user_verification(
+    client, passkey, webauthn_authentication_bypass
 ):
+    with webauthn_authentication_bypass(passkey, user_verified=False) as credential:
+        resp = client.get(
+            reverse("mfa_login_webauthn"), HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        assert resp.status_code == HTTPStatus.OK
+        resp = client.post(
+            reverse("mfa_login_webauthn"), data={"credential": credential}
+        )
+
+    assert resp["location"] == reverse("account_login")
+    assert get_authentication_records(resp.wsgi_request, passkey.user) == []
+
+
+def test_inactive_passkey_login_does_not_bypass_mfa_for_next_user(
+    client,
+    user_with_passkey,
+    user_factory,
+    user_password,
+    webauthn_authentication_bypass,
+):
+    inactive_user = user_factory(is_active=False)
+    inactive_passkey = Authenticator.objects.create(
+        user=inactive_user,
+        type=Authenticator.Type.WEBAUTHN,
+        data={
+            "name": "Inactive user's passkey",
+            "passwordless": True,
+            "credential": {},
+        },
+    )
+
+    with webauthn_authentication_bypass(inactive_passkey) as credential:
+        resp = client.get(
+            reverse("mfa_login_webauthn"), HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        assert resp.status_code == HTTPStatus.OK
+        resp = client.post(
+            reverse("mfa_login_webauthn"), data={"credential": credential}
+        )
+
+    assert resp["location"] == reverse("account_inactive")
+    assert get_authentication_records(resp.wsgi_request, inactive_user) == []
+
+    resp = client.post(
+        reverse("account_login"),
+        {"login": user_with_passkey.username, "password": user_password},
+    )
+
+    assert resp["location"] == reverse("mfa_authenticate")
+
+
+@pytest.mark.parametrize("user_verification", ["preferred", "required"])
+def test_reauthenticate(
+    auth_client,
+    passkey,
+    user_with_recovery_codes,
+    webauthn_authentication_bypass,
+    settings,
+    user_verification,
+):
+    settings.MFA_WEBAUTHN_USER_VERIFICATION = user_verification
     resp = auth_client.get(reverse("mfa_view_recovery_codes"))
     assert resp.status_code == HTTPStatus.FOUND
     assert resp["location"].startswith(reverse("account_reauthenticate"))
@@ -43,8 +107,10 @@ def test_reauthenticate(
     assertTemplateUsed(resp, "mfa/reauthenticate.html")
 
     with webauthn_authentication_bypass(passkey) as credential:
-        resp = auth_client.get(
-            reverse("mfa_reauthenticate_webauthn"),
+        resp = auth_client.get(reverse("mfa_reauthenticate_webauthn"))
+        assert (
+            resp.context["js_data"]["request_options"]["publicKey"]["userVerification"]
+            == user_verification
         )
         resp = auth_client.post(
             reverse("mfa_reauthenticate_webauthn"),
@@ -71,15 +137,34 @@ def test_get_passkey_login_challenge(client, db):
                 "challenge": ANY,
                 "rpId": "testserver",
                 "allowCredentials": [],
-                "userVerification": "preferred",
+                "userVerification": "required",
             }
         }
     }
 
 
+def test_invalid_user_verification_setting(settings):
+    settings.MFA_WEBAUTHN_USER_VERIFICATION = "invalid"
+    with pytest.raises(ImproperlyConfigured):
+        mfa_app_settings.WEBAUTHN_USER_VERIFICATION
+
+
 def test_invalid_passkey_login(client, passkey):
     resp = client.post(reverse("mfa_login_webauthn"), data={"credential": "{}"})
     assert resp["location"] == reverse("account_login")
+
+
+def test_passkey_login_rate_limit_applies_before_parsing(
+    client, settings, enable_cache
+):
+    settings.MFA_RATE_LIMITS = {"webauthn_login": "1/m/ip"}
+    url = reverse("mfa_login_webauthn")
+
+    resp = client.post(url, data={"credential": "{}"})
+    assert resp["location"] == reverse("account_login")
+
+    resp = client.post(url, data={"credential": "{}"})
+    assert resp.status_code == HTTPStatus.TOO_MANY_REQUESTS
 
 
 def test_rename_key(auth_client, passkey, reauthentication_bypass):
@@ -146,6 +231,50 @@ def test_add_key(
         ).exists()
 
 
+def test_add_passwordless_key_requires_user_verification(
+    auth_client,
+    user,
+    webauthn_registration_bypass,
+    reauthentication_bypass,
+):
+    with reauthentication_bypass():
+        auth_client.get(reverse("mfa_add_webauthn"))
+        with webauthn_registration_bypass(
+            user, passwordless=True, user_verified=False
+        ) as credential:
+            resp = auth_client.post(
+                reverse("mfa_add_webauthn"),
+                data={"credential": credential, "passwordless": "on"},
+            )
+
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.context["form"].errors == {
+        "__all__": [get_adapter().error_messages["incorrect_code"]]
+    }
+    assert not Authenticator.objects.filter(
+        user=user, type=Authenticator.Type.WEBAUTHN
+    ).exists()
+
+
+@pytest.mark.parametrize("user_verification", ["discouraged", "preferred", "required"])
+def test_get_add_key_user_verification(
+    auth_client,
+    reauthentication_bypass,
+    settings,
+    user_verification,
+):
+    settings.MFA_WEBAUTHN_USER_VERIFICATION = user_verification
+    with reauthentication_bypass():
+        resp = auth_client.get(reverse("mfa_add_webauthn"))
+
+    assert (
+        resp.context["js_data"]["creation_options"]["publicKey"][
+            "authenticatorSelection"
+        ]["userVerification"]
+        == user_verification
+    )
+
+
 def test_list_keys(auth_client):
     resp = auth_client.get(reverse("mfa_list_webauthn"))
     assertTemplateUsed(resp, "mfa/webauthn/authenticator_list.html")
@@ -193,6 +322,14 @@ def test_passkey_signup(client, db, webauthn_registration_bypass):
     assert resp["location"] == settings.LOGIN_REDIRECT_URL
 
 
+def test_login_webauthn_when_already_authenticated(auth_client, passkey):
+    """Visiting the WebAuthn login page as a logged-in user should redirect,
+    not crash."""
+    resp = auth_client.get(reverse("mfa_login_webauthn"))
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == settings.LOGIN_REDIRECT_URL
+
+
 def test_webauthn_login(
     client, user_with_passkey, passkey, user_password, webauthn_authentication_bypass
 ):
@@ -208,7 +345,16 @@ def test_webauthn_login(
         resp = client.post(reverse("mfa_authenticate"), {"credential": credential})
     assert resp.status_code == HTTPStatus.FOUND
     assert resp["location"] == settings.LOGIN_REDIRECT_URL
-    assert client.session[AUTHENTICATION_METHODS_SESSION_KEY] == [
-        {"method": "password", "at": ANY, "username": user_with_passkey.username},
-        {"method": "mfa", "at": ANY, "id": ANY, "type": Authenticator.Type.WEBAUTHN},
+    assert get_authentication_records(resp.wsgi_request, user_with_passkey) == [
+        {
+            "method": "password",
+            "at": ANY,
+            "username": user_with_passkey.username,
+        },
+        {
+            "method": "mfa",
+            "at": ANY,
+            "id": ANY,
+            "type": Authenticator.Type.WEBAUTHN,
+        },
     ]

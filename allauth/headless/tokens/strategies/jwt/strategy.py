@@ -1,17 +1,44 @@
-from typing import Any, Dict, Optional, Tuple
+from __future__ import annotations
 
+from typing import Any
+
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.contrib.sessions.backends.base import SessionBase
 from django.http import HttpRequest
 
-from allauth.core.internal.httpkit import get_authorization_credential
+from allauth.core import context
+from allauth.core.internal.httpkit import (
+    authenticated_user,
+    get_authorization_credential,
+)
 from allauth.headless import app_settings
 from allauth.headless.internal import sessionkit
 from allauth.headless.tokens.strategies.base import AbstractTokenStrategy
 from allauth.headless.tokens.strategies.jwt import internal
+from allauth.usersessions.internal import usersessionkit
 
 
 class JWTTokenStrategy(AbstractTokenStrategy):
-    def get_session_token(self, request: HttpRequest) -> Optional[str]:
+    @classmethod
+    def openapi_spec(cls) -> dict[str, Any]:
+        scheme = app_settings.JWT_AUTHORIZATION_HEADER_SCHEME
+        spec = super().openapi_spec()
+        description = (
+            f"JWT access token, using the `{scheme}` authorization scheme. "
+            "Only needed when `client` is equal to `app`."
+        )
+        jwt_security_scheme = {
+            "type": "http",
+            "scheme": scheme.lower(),
+            "description": description,
+        }
+        if scheme.lower() == "bearer":
+            jwt_security_scheme["bearerFormat"] = "JWT"
+        spec["securitySchemes"]["JWT"] = jwt_security_scheme
+        spec["security"].insert(-1, {"JWT": []})
+        return spec
+
+    def get_session_token(self, request: HttpRequest) -> str | None:
         ret = super().get_session_token(request)
         if ret:
             return ret
@@ -26,13 +53,12 @@ class JWTTokenStrategy(AbstractTokenStrategy):
         )
         if access_token is None:
             return None
-        user_payload = internal.validate_access_token(access_token)
-        if user_payload is None:
+        result = internal.validate_access_token(access_token)
+        if result is None:
             return None
-        return user_payload[1]
+        return result.payload
 
     def create_session_token(self, request: HttpRequest) -> str:
-        assert request.user.is_authenticated  # nosec
         if not request.session.session_key:
             request.session.save()
         key = request.session.session_key
@@ -42,22 +68,22 @@ class JWTTokenStrategy(AbstractTokenStrategy):
 
     def create_access_token_payload(
         self, request: HttpRequest
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         ret = super().create_access_token_payload(request)
         if ret is not None:
-            ret["refresh_token"] = internal.create_refresh_token(
-                request.user, request.session
-            )
+            user = authenticated_user(request)
+            ret["refresh_token"] = internal.create_refresh_token(user, request.session)
         return ret
 
-    def lookup_session(self, session_token: str) -> Optional[SessionBase]:
+    def lookup_session(self, session_token: str) -> SessionBase | None:
         return sessionkit.lookup_session(session_token)
 
-    def create_access_token(self, request: HttpRequest) -> Optional[str]:
-        claims = self.get_claims(request.user)
-        return internal.create_access_token(request.user, request.session, claims)
+    def create_access_token(self, request: HttpRequest) -> str | None:
+        user = authenticated_user(request)
+        claims = self.get_claims(user)
+        return internal.create_access_token(user, request.session, claims)
 
-    def get_claims(self, user) -> Dict[str, Any]:
+    def get_claims(self, user: AbstractBaseUser) -> dict[str, Any]:
         """
         Returns additional claims to be included in the access token.  Note that
         the following claims are reserved and will be automatically set by allauth regardless of what you return:
@@ -70,7 +96,7 @@ class JWTTokenStrategy(AbstractTokenStrategy):
         """
         return {}
 
-    def refresh_token(self, refresh_token: str) -> Optional[Tuple[str, str]]:
+    def refresh_token(self, refresh_token: str) -> tuple[str, str] | None:
         user_session_payload = internal.validate_refresh_token(refresh_token)
         if user_session_payload is None:
             return None
@@ -84,4 +110,5 @@ class JWTTokenStrategy(AbstractTokenStrategy):
         else:
             next_refresh_token = refresh_token
         session.save()
+        usersessionkit.track_activity(context.request, user=user, session=session)
         return access_token, next_refresh_token

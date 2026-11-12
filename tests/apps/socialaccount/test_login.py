@@ -1,6 +1,6 @@
 import copy
 from http import HTTPStatus
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
@@ -9,9 +9,11 @@ from django.urls import reverse
 import pytest
 from pytest_django.asserts import assertTemplateUsed
 
-from allauth.account.authentication import AUTHENTICATION_METHODS_SESSION_KEY
+from allauth.account.authentication import get_authentication_records
 from allauth.core import context
 from allauth.socialaccount.helpers import complete_social_login
+from allauth.socialaccount.internal import statekit
+from allauth.socialaccount.internal.flows import login
 from allauth.socialaccount.models import SocialAccount, SocialToken
 from allauth.socialaccount.providers.base import AuthProcess
 
@@ -97,10 +99,37 @@ def test_email_authentication(
         assert not updated_signal.called
 
 
-def test_login_cancelled(client):
+def test_login_cancelled(client, db):
     resp = client.get(reverse("socialaccount_login_cancelled"))
     assert resp.status_code == HTTPStatus.OK
     assertTemplateUsed(resp, "socialaccount/login_cancelled.html")
+
+
+@pytest.mark.parametrize("same_user", [False, True])
+def test_authenticated_user_login_pending_states(
+    request_factory, user, user_factory, same_user
+):
+    request = request_factory.get("/")
+    request.user = user
+    pending_states = {"pending": ({"process": AuthProcess.LOGIN}, 123, "provider")}
+    request.session[statekit.STATES_SESSION_KEY] = pending_states
+    sociallogin = Mock(
+        user=user if same_user else user_factory(),
+        is_existing=True,
+    )
+
+    account_adapter = Mock()
+    account_adapter.logout.side_effect = lambda request: request.session.flush()
+    with (
+        patch.object(login, "get_account_adapter", return_value=account_adapter),
+        patch.object(login, "_login", return_value="response"),
+    ):
+        response = login._authenticate(request, sociallogin)
+
+    assert response == "response"
+    assert request.session.get(statekit.STATES_SESSION_KEY) == (
+        pending_states if same_user else None
+    )
 
 
 @pytest.mark.parametrize("store_tokens", [False, True])
@@ -134,7 +163,7 @@ def test_record_authentication(
     with context.request_context(request):
         complete_social_login(request, sociallogin)
     if did_record:
-        assert request.session[AUTHENTICATION_METHODS_SESSION_KEY] == [
+        assert get_authentication_records(request, user) == [
             {
                 "at": ANY,
                 "provider": sociallogin.account.provider,
@@ -143,7 +172,7 @@ def test_record_authentication(
             }
         ]
     else:
-        assert AUTHENTICATION_METHODS_SESSION_KEY not in request.session
+        assert get_authentication_records(request, user) == []
     assert (
         SocialToken.objects.filter(
             account__uid="123", token="123", token_secret="456"

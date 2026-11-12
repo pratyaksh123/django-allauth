@@ -38,11 +38,25 @@ Available settings:
   require mandatory email verification and have
   ``ACCOUNT_EMAIL_VERIFICATION_BY_CODE_ENABLED`` set to ``True``.
 
+``MFA_RATE_LIMITS`` (default: ``{...}``)
+  Rate limit configuration, defaulting to::
+
+      {
+       "webauthn_login": "10/m/ip",
+      }
+
+``MFA_REAUTHENTICATION_REQUIRED`` (default: ``True``)
+  Specifies whether or not reauthentication is required before the user can
+  alter their MFA related settings.
+
 ``MFA_RECOVERY_CODE_COUNT`` (default: ``10``)
   The number of recovery codes.
 
 ``MFA_RECOVERY_CODE_DIGITS`` (default: ``8``)
   The number of digits of each recovery code.
+
+``MFA_RECOVERY_CODES_SHOW_ONCE`` (default: ``False``)
+  Whether or not recovery codes are shown only once.
 
 ``MFA_SUPPORTED_TYPES`` (default: ``[["recovery_codes", "totp"]``)
   The authenticator types that end users are able to setup. Allowed
@@ -67,6 +81,12 @@ Available settings:
   local development and testing. To work around that, you can use this setting.
   Only use this for development, never on production. See commit ``8b979313``
   over at ``fido2``.
+
+``MFA_WEBAUTHN_USER_VERIFICATION`` (default: ``"preferred"``)
+  Controls whether user verification is requested when registering or using
+  WebAuthn as an MFA or reauthentication method. Accepted values are
+  ``"discouraged"``, ``"preferred"``, and ``"required"``. Passkey registration
+  and login always require user verification, regardless of this setting.
 
 ``MFA_TRUST_ENABLED`` (default: ``False``)
   Enables the "Trust this browser?" functionality, which presents users with MFA

@@ -1,15 +1,19 @@
-from typing import Iterable, Optional, Tuple
+from __future__ import annotations
+
+from collections.abc import Iterable
 
 from django.contrib import messages
-from django.http import HttpRequest
+from django.contrib.auth.base_user import AbstractBaseUser
+from django.http import HttpRequest, HttpResponse
 
 from allauth.account.adapter import get_adapter as get_account_adapter
-from allauth.account.authentication import get_authentication_records
 from allauth.account.internal import flows
+from allauth.account.internal.flows.login import get_authentication_records
 from allauth.account.internal.flows.reauthentication import (
     raise_if_reauthentication_required,
 )
 from allauth.account.models import Login
+from allauth.core.internal.httpkit import authenticated_user
 from allauth.mfa import signals
 from allauth.mfa.base.internal.flows import delete_and_cleanup, post_authentication
 from allauth.mfa.models import Authenticator
@@ -21,12 +25,14 @@ def begin_registration(
     request: HttpRequest, user, passwordless: bool, signup: bool = False
 ) -> dict:
     if not signup:
-        raise_if_reauthentication_required(request)
+        raise_if_reauthentication_required(request, app="allauth.mfa")
     creation_options = auth.begin_registration(user, passwordless)
     return creation_options
 
 
-def signup_authenticator(request, user, name: str, credential: dict) -> Authenticator:
+def signup_authenticator(
+    request: HttpRequest, user, name: str, credential: dict
+) -> Authenticator:
     authenticator, rc_authenticator = _signup_or_add_authenticator(
         request, user, name, credential, signup=True
     )
@@ -34,9 +40,9 @@ def signup_authenticator(request, user, name: str, credential: dict) -> Authenti
 
 
 def add_authenticator(
-    request, name: str, credential: dict
-) -> Tuple[Authenticator, Optional[Authenticator]]:
-    raise_if_reauthentication_required(request)
+    request: HttpRequest, name: str, credential: dict
+) -> tuple[Authenticator, Authenticator | None]:
+    raise_if_reauthentication_required(request, app="allauth.mfa")
     return _signup_or_add_authenticator(
         request,
         user=request.user,
@@ -47,12 +53,12 @@ def add_authenticator(
 
 
 def _signup_or_add_authenticator(
-    request,
+    request: HttpRequest,
     user,
     name: str,
     credential: dict,
     signup: bool = False,
-) -> Tuple[Authenticator, Optional[Authenticator]]:
+) -> tuple[Authenticator, Authenticator | None]:
     authenticator = auth.WebAuthn.add(
         user,
         name,
@@ -74,27 +80,39 @@ def _signup_or_add_authenticator(
     return authenticator, rc_authenticator
 
 
-def remove_authenticators(request, authenticators: Iterable[Authenticator]) -> None:
-    raise_if_reauthentication_required(request)
+def remove_authenticators(
+    request: HttpRequest, authenticators: Iterable[Authenticator]
+) -> None:
+    raise_if_reauthentication_required(request, app="allauth.mfa")
     for authenticator in authenticators:
-        remove_authenticator(request, authenticator)
+        _remove_authenticator_without_reauthentication(request, authenticator)
 
 
-def remove_authenticator(request, authenticator: Authenticator):
-    raise_if_reauthentication_required(request)
+def remove_authenticator(request: HttpRequest, authenticator: Authenticator) -> None:
+    raise_if_reauthentication_required(request, app="allauth.mfa")
+    _remove_authenticator_without_reauthentication(request, authenticator)
+
+
+def _remove_authenticator_without_reauthentication(
+    request: HttpRequest, authenticator: Authenticator
+) -> None:
     delete_and_cleanup(request, authenticator)
     adapter = get_account_adapter(request)
     adapter.add_message(request, messages.SUCCESS, "mfa/messages/webauthn_removed.txt")
-    adapter.send_notification_mail("mfa/email/webauthn_removed", request.user)
+    adapter.send_notification_mail(
+        "mfa/email/webauthn_removed", authenticated_user(request)
+    )
 
 
-def perform_passwordless_login(request, authenticator: Authenticator, login: Login):
+def perform_passwordless_login(
+    request: HttpRequest, authenticator: Authenticator, login: Login
+) -> HttpResponse:
     post_authentication(request, authenticator, passwordless=True)
     return flows.login.perform_login(request, login)
 
 
-def did_use_passwordless_login(request: HttpRequest) -> bool:
-    records = get_authentication_records(request)
+def did_use_passwordless_login(request: HttpRequest, user: AbstractBaseUser) -> bool:
+    records = get_authentication_records(request, user)
     return any(
         (record.get("method"), record.get("type"), record.get("passwordless"))
         == ("mfa", "webauthn", True)
@@ -102,12 +120,14 @@ def did_use_passwordless_login(request: HttpRequest) -> bool:
     )
 
 
-def reauthenticate(request: HttpRequest, authenticator: Authenticator):
+def reauthenticate(request: HttpRequest, authenticator: Authenticator) -> None:
     post_authentication(request, authenticator, reauthenticated=True)
 
 
-def rename_authenticator(request, authenticator: Authenticator, name: str):
-    raise_if_reauthentication_required(request)
+def rename_authenticator(
+    request: HttpRequest, authenticator: Authenticator, name: str
+) -> None:
+    raise_if_reauthentication_required(request, app="allauth.mfa")
     wrapper = authenticator.wrap()
     wrapper.name = name
     authenticator.save()

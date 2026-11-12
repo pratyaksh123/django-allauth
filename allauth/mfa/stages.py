@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from django.http import HttpRequest
+
 from allauth.account import app_settings as account_settings
 from allauth.account.internal.constants import LoginStageKey as AccountLoginStageKey
 from allauth.account.stages import LoginStage
@@ -14,21 +18,21 @@ class AuthenticateStage(LoginStage):
     key = LoginStageKey.MFA_AUTHENTICATE.value
     urlname = "mfa_authenticate"
 
-    def handle(self):
+    def handle(self) -> tuple:
         response, cont = None, True
         if self._should_handle(self.request):
             self.state["authentication_required"] = True
             response = headed_redirect_response("mfa_authenticate")
         return response, cont
 
-    def _should_handle(self, request) -> bool:
+    def _should_handle(self, request: HttpRequest) -> bool:
         if self.login.user is None:
             return False
         if not is_mfa_enabled(
             self.login.user, [Authenticator.Type.TOTP, Authenticator.Type.WEBAUTHN]
         ):
             return False
-        if did_use_passwordless_login(request):
+        if did_use_passwordless_login(request, self.login.user):
             return False
         if trust.is_trusted_browser(request, self.login.user):
             return False
@@ -39,7 +43,7 @@ class TrustStage(LoginStage):
     key = LoginStageKey.MFA_TRUST.value
     urlname = "mfa_trust"
 
-    def handle(self):
+    def handle(self) -> tuple:
         lbc_stage = self.controller.get_stage(AccountLoginStageKey.LOGIN_BY_CODE)
         auth_stage = self.controller.get_stage(AuthenticateStage.key)
 

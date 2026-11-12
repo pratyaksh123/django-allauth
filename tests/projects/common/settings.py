@@ -1,13 +1,11 @@
 from pathlib import Path
-from typing import Tuple
 
 
-INSTALLED_SOCIALACCOUNT_APPS: Tuple[str, ...] = (
+INSTALLED_SOCIALACCOUNT_APPS: tuple[str, ...] = (
     "allauth.socialaccount",
     "allauth.socialaccount.providers.agave",
     "allauth.socialaccount.providers.amazon",
     "allauth.socialaccount.providers.amazon_cognito",
-    "allauth.socialaccount.providers.angellist",
     "allauth.socialaccount.providers.apple",
     "allauth.socialaccount.providers.asana",
     "allauth.socialaccount.providers.atlassian",
@@ -62,6 +60,7 @@ INSTALLED_SOCIALACCOUNT_APPS: Tuple[str, ...] = (
     "allauth.socialaccount.providers.instagram",
     "allauth.socialaccount.providers.jupyterhub",
     "allauth.socialaccount.providers.kakao",
+    "allauth.socialaccount.providers.klaviyo",
     "allauth.socialaccount.providers.lemonldap",
     "allauth.socialaccount.providers.lichess",
     "allauth.socialaccount.providers.line",
@@ -89,6 +88,7 @@ INSTALLED_SOCIALACCOUNT_APPS: Tuple[str, ...] = (
     "allauth.socialaccount.providers.pocket",
     "allauth.socialaccount.providers.questrade",
     "allauth.socialaccount.providers.quickbooks",
+    "allauth.socialaccount.providers.recharge",
     "allauth.socialaccount.providers.reddit",
     "allauth.socialaccount.providers.robinhood",
     "allauth.socialaccount.providers.salesforce",

@@ -1,5 +1,14 @@
+from __future__ import annotations
+
+from typing import Any
+
 from django.contrib.auth import REDIRECT_FIELD_NAME
-from django.http import HttpResponseRedirect
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBase,
+    HttpResponseRedirect,
+)
 from django.shortcuts import render
 from django.urls import reverse
 from django.utils.decorators import method_decorator
@@ -10,6 +19,7 @@ from openid.consumer import consumer
 from openid.consumer.discover import DiscoveryFailure
 from openid.extensions.ax import AttrInfo, FetchRequest
 from openid.extensions.sreg import SRegRequest
+from openid.message import InvalidOpenIDNamespace
 
 from allauth.account.internal.decorators import login_not_required
 from allauth.socialaccount.app_settings import QUERY_EMAIL
@@ -17,7 +27,7 @@ from allauth.socialaccount.helpers import (
     complete_social_login,
     render_authentication_error,
 )
-from allauth.socialaccount.models import SocialLogin
+from allauth.socialaccount.internal import statekit
 from allauth.socialaccount.providers.openid.provider import OpenIDProvider
 
 from ..base import AuthError
@@ -25,7 +35,7 @@ from .forms import LoginForm
 from .utils import AXAttributes, DBOpenIDStore, JSONSafeSession, SRegFields
 
 
-def _openid_consumer(request, provider, endpoint):
+def _openid_consumer(request: HttpRequest, provider, endpoint):
     server_settings = provider.get_server_settings(endpoint)
     stateless = server_settings.get("stateless", False)
     store = None if stateless else DBOpenIDStore()
@@ -39,11 +49,13 @@ class OpenIDLoginView(View):
     form_class = LoginForm
     provider_class = OpenIDProvider
 
-    def dispatch(self, request, *args, **kwargs):
+    def dispatch(
+        self, request: HttpRequest, *args: Any, **kwargs: Any
+    ) -> HttpResponseBase:
         self.provider = self.provider_class(request)
         return super().dispatch(request, *args, **kwargs)
 
-    def get(self, request):
+    def get(self, request: HttpRequest) -> HttpResponse:
         form = self.get_form()
         if not form.is_valid():
             return render(request, self.template_name, {"form": form})
@@ -54,7 +66,7 @@ class OpenIDLoginView(View):
             # UnicodeDecodeError: necaris/python3-openid#1
             return render_authentication_error(request, self.provider, exception=e)
 
-    def post(self, request):
+    def post(self, request: HttpRequest) -> HttpResponse:
         form = self.get_form()
         if form.is_valid():
             try:
@@ -113,11 +125,13 @@ class OpenIDLoginView(View):
                 ax.add(AttrInfo(name, required=required))
             auth_request.addExtension(ax)
 
-        SocialLogin.stash_state(request)
+        redirect_kwargs = provider.get_redirect_from_request_kwargs(request)
+        provider.stash_redirect_state(request, **redirect_kwargs)
 
         # Fix for issues 1523 and 2072 (github django-allauth)
-        if "next" in form.cleaned_data and form.cleaned_data["next"]:
-            auth_request.return_to_args["next"] = form.cleaned_data["next"]
+        next_url = redirect_kwargs.get("next_url")
+        if next_url:
+            auth_request.return_to_args["next"] = next_url
         redirect_url = auth_request.redirectURL(
             realm, request.build_absolute_uri(self.get_callback_url())
         )
@@ -131,15 +145,20 @@ login = OpenIDLoginView.as_view()
 class OpenIDCallbackView(View):
     provider_class = OpenIDProvider
 
-    def get(self, request):
+    def get(self, request: HttpRequest) -> HttpResponse:
         provider = self.provider = self.provider_class(request)
         endpoint = request.GET.get("openid.op_endpoint", "")
         client = self.get_client(provider, endpoint)
-        response = self.get_openid_response(client)
+        try:
+            response = self.get_openid_response(client)
+        except InvalidOpenIDNamespace as e:
+            return render_authentication_error(self.request, self.provider, exception=e)
 
         if response.status == consumer.SUCCESS:
             login = provider.sociallogin_from_response(request, response)
-            login.state = SocialLogin.unstash_state(request)
+            login.state = statekit.unstash_last_state(
+                request, provider_id=provider.sub_id, raises=True
+            )
             return self.complete_login(login)
         else:
             if response.status == consumer.CANCEL:
@@ -150,10 +169,10 @@ class OpenIDCallbackView(View):
 
     post = get
 
-    def complete_login(self, login):
+    def complete_login(self, login) -> HttpResponse:
         return complete_social_login(self.request, login)
 
-    def render_error(self, error):
+    def render_error(self, error) -> HttpResponse:
         return render_authentication_error(self.request, self.provider, error=error)
 
     def get_client(self, provider, endpoint):

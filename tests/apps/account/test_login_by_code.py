@@ -1,21 +1,31 @@
 from http import HTTPStatus
-from unittest.mock import ANY
+from unittest.mock import ANY, patch
 
 from django.urls import reverse
 
 import pytest
 
 from allauth import app_settings as allauth_settings
-from allauth.account.authentication import AUTHENTICATION_METHODS_SESSION_KEY
+from allauth.account.authentication import get_authentication_records
 from allauth.account.internal.stagekit import LOGIN_SESSION_KEY
 from allauth.account.models import EmailAddress
 from allauth.account.stages import LoginByCodeStage
 
 
 @pytest.fixture
-def request_login_by_code(mailoutbox):
+def get_expected_login_code():
+    def f(client):
+        return client.session[LOGIN_SESSION_KEY]["state"]["stages"][
+            LoginByCodeStage.key
+        ]["data"]["code"]
+
+    return f
+
+
+@pytest.fixture
+def request_login_by_code(mailoutbox, get_expected_login_code):
     def f(client, email):
-        resp = client.get(reverse("account_request_login_code") + "?next=/foo")
+        resp = client.get(f"{reverse('account_request_login_code')}?next=/foo")
         assert resp.status_code == HTTPStatus.OK
         assert b'value="/foo"' in resp.content
         resp = client.post(
@@ -23,13 +33,11 @@ def request_login_by_code(mailoutbox):
         )
         assert resp.status_code == HTTPStatus.FOUND
         assert (
-            resp["location"] == reverse("account_confirm_login_code") + "?next=%2Ffoo"
+            resp["location"] == f"{reverse('account_confirm_login_code')}?next=%2Ffoo"
         )
         assert len(mailoutbox) == 1
-        code = client.session[LOGIN_SESSION_KEY]["state"]["stages"][
-            LoginByCodeStage.key
-        ]["data"]["code"]
-        assert len(code) == 6
+        code = get_expected_login_code(client)
+        assert len(code) == 9
         assert code in mailoutbox[0].body
         return code
 
@@ -38,7 +46,7 @@ def request_login_by_code(mailoutbox):
 
 def test_login_by_code(client, user, request_login_by_code):
     code = request_login_by_code(client, user.email)
-    code_with_ws = " " + code[0:3] + " " + code[3:]
+    code_with_ws = f" {code[0:3]} {code[3:]}"
     resp = client.post(
         reverse("account_confirm_login_code"),
         data={"code": code_with_ws, "next": "/foo"},
@@ -46,28 +54,78 @@ def test_login_by_code(client, user, request_login_by_code):
     assert resp.status_code == HTTPStatus.FOUND
     assert LOGIN_SESSION_KEY not in client.session
     assert resp["location"] == "/foo"
-    assert client.session[AUTHENTICATION_METHODS_SESSION_KEY][-1] == {
+    assert get_authentication_records(resp.wsgi_request, user)[-1] == {
         "method": "code",
         "email": user.email,
         "at": ANY,
     }
 
 
+def test_login_by_code_resend_limited(
+    client, user, request_login_by_code, settings, get_expected_login_code
+):
+    settings.ACCOUNT_LOGIN_BY_CODE_SUPPORTS_RESEND = 2
+    code = request_login_by_code(client, user.email)
+    for i in range(3):
+        resp = client.post(
+            reverse("account_confirm_login_code"), data={"action": "resend"}
+        )
+
+        assert resp.status_code == (
+            # Form error if resend not possible
+            HTTPStatus.OK
+            if i == 2
+            # If resend allowed, the resend form is valid and results in a redirect.
+            else HTTPStatus.FOUND
+        )
+        new_code = get_expected_login_code(client)
+        if i == 2:
+            assert new_code == code
+        else:
+            assert new_code != code
+            code = new_code
+
+
+def test_login_by_code_resend_uses_new_code(
+    client, user, request_login_by_code, settings, get_expected_login_code
+):
+    settings.ACCOUNT_LOGIN_BY_CODE_SUPPORTS_RESEND = 2
+    code = request_login_by_code(client, user.email)
+    resp = client.post(reverse("account_confirm_login_code"), data={"action": "resend"})
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("account_confirm_login_code")
+    new_code = get_expected_login_code(client)
+    assert new_code != code
+    resp = client.post(reverse("account_confirm_login_code"), data={"code": new_code})
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == settings.LOGIN_REDIRECT_URL
+
+
 def test_login_by_code_max_attempts(client, user, request_login_by_code, settings):
     settings.ACCOUNT_LOGIN_BY_CODE_MAX_ATTEMPTS = 2
     request_login_by_code(client, user.email)
     for i in range(3):
-        resp = client.post(
-            reverse("account_confirm_login_code"), data={"code": "wrong"}
-        )
-        if i >= 1:
-            assert resp.status_code == HTTPStatus.FOUND
-            assert resp["location"] == reverse("account_request_login_code")
-            assert LOGIN_SESSION_KEY not in client.session
-        else:
-            assert resp.status_code == HTTPStatus.OK
-            assert LOGIN_SESSION_KEY in client.session
-            assert resp.context["form"].errors == {"code": ["Incorrect code."]}
+        with patch(
+            "allauth.account.signals.login_code_rejected"
+        ) as code_rejected_signal:
+            resp = client.post(
+                reverse("account_confirm_login_code"), data={"code": "wrong"}
+            )
+            if i >= 1:
+                assert resp.status_code == HTTPStatus.FOUND
+                assert resp["location"] == reverse("account_request_login_code")
+                assert LOGIN_SESSION_KEY not in client.session
+            else:
+                assert resp.status_code == HTTPStatus.OK
+                assert LOGIN_SESSION_KEY in client.session
+                assert resp.context["form"].errors == {"code": ["Incorrect code."]}
+
+            signal_called = i <= 1
+            assert code_rejected_signal.send.called == signal_called
+            if signal_called:
+                signal_kwargs = code_rejected_signal.send.call_args[1]
+                assert signal_kwargs["user"] == user
+                assert signal_kwargs["last_attempt"] == (i == 1)
 
 
 def test_login_by_code_unknown_user(mailoutbox, client, db):
@@ -138,7 +196,6 @@ def test_trust_flow(
     with settings_impacting_urls(
         ACCOUNT_LOGIN_BY_CODE_TRUST_ENABLED=True, ACCOUNT_LOGIN_BY_CODE_REQUIRED=True
     ):
-
         # Login
         resp = client.post(
             reverse("account_login"),

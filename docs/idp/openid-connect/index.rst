@@ -9,5 +9,7 @@ OpenID Connect
    configuration
    views
    clients
+   dynamic-client-registration
+   client-id-metadata-document
    adapter
    integrations
